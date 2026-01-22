@@ -1,4 +1,4 @@
-name: Sign document with Signum Container Agent (basic)
+name: Sign document with Signum Container Agent (basic with)
 
 on:
   workflow_dispatch:
