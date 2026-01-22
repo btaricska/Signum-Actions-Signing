@@ -1,0 +1,82 @@
+name: Sign document with Signum Container Agent (basic)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "filestosign/**"
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notes / Support Disclaimer
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Signum Container Agent with Signing Tools – Support / Usage Notes
+
+          Signum Container Agent with Signing Tools is open source and supported on a best effort level for this set of examples. This means customers can report Bugs, Feature Requests, Documentation amendment or questions as well as requests for customer information required for setup that needs Keyfactor access to obtain. Such requests do not follow normal SLA commitments for response or resolution.
+
+          If you have a support issue, please open a support ticket via the Keyfactor Support Portal:
+          https://support.keyfactor.com/
+
+          To report a problem or suggest a new feature, use the Issues tab.
+          If you want to contribute bug fixes or enhancements, use the Pull requests tab.
+          EOF
+
+      - name: Run Signum Agent container and list available certs
+        shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # Ensure there's something to sign (demo file)
+          mkdir -p filestosign
+          if [ ! -f "filestosign/example-script.ps1" ]; then
+            echo 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
+          fi
+
+          docker pull repo.keyfactor.com/images/signum-agent:4.60.2
+
+          docker run --name signum-agent -d \
+            -v "$PWD/filestosign:/mnt/filestosign" \
+            -e "SIGNUM_HOSTNAME=$SIGNUM_HOSTNAME" \
+            -e "SIGNUM_CLIENTID=$SIGNUM_CLIENTID" \
+            -e "SIGNUM_USERNAME=$SIGNUM_USERNAME" \
+            -e "SIGNUM_PASSWORD=$SIGNUM_PASSWORD" \
+            -e "SIGNUM_LOGLEVEL=HIGH" \
+            -e "SIGNUM_LOGTYPE=FILE" \
+            repo.keyfactor.com/images/signum-agent:4.60.2
+
+          # Sanity check: list certs/keys visible to the agent
+          docker exec signum-agent signum-util lc | tee signum-certs.txt
+
+          echo "### Signum cert listing (signum-util lc)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat signum-certs.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup container
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f signum-agent >/dev/null 2>&1 || true
+
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signum-output
+          path: |
+            signum-certs.txt
+            filestosign/example-script.ps1
