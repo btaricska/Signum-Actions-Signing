@@ -2,6 +2,11 @@ name: Sign document with Signum Container Agent (basic with)
 
 on:
   workflow_dispatch:
+    inputs:
+      signum_agent_image:
+        description: "Container image to use (include tag)."
+        required: false
+        default: "repo.keyfactor.com/images/signum-agent:latest"
   push:
     branches: ["main"]
     paths:
@@ -15,8 +20,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ✅ Set ONE image reference and use it everywhere
-      SIGNUM_AGENT_IMAGE: repo.keyfactor.com/images/signum-agent:4.60.2
       SIGNUM_REGISTRY: repo.keyfactor.com
 
     steps:
@@ -28,8 +31,6 @@ jobs:
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Signum Container Agent with Signing Tools – Support / Usage Notes
-
-          Signum Container Agent with Signing Tools is open source and supported on a best effort level for this set of examples.
           Support issues: https://support.keyfactor.com/
           EOF
 
@@ -49,13 +50,12 @@ jobs:
           }
           EOF
 
-          echo "== Docker config written =="
-          # Show registry keys only (no secrets)
+          echo "== Docker auth configured for =="
           python3 - <<'PY'
           import json, os
           with open(os.path.expanduser("~/.docker/config.json")) as f:
               cfg=json.load(f)
-          print("auths keys:", list(cfg.get("auths", {}).keys()))
+          print(list(cfg.get("auths", {}).keys()))
           PY
 
       - name: Run Signum Agent container and list available certs (debug)
@@ -65,6 +65,7 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+          SIGNUM_AGENT_IMAGE: ${{ github.event.inputs.signum_agent_image || 'repo.keyfactor.com/images/signum-agent:latest' }}
         run: |
           set -euo pipefail
 
@@ -86,7 +87,6 @@ jobs:
           fi
 
           echo "== Validate image ref (manifest) =="
-          # This fails fast if the ref is malformed OR auth doesn't work
           docker manifest inspect "${SIGNUM_AGENT_IMAGE}" >/dev/null
 
           echo "== Pull Signum agent image =="
@@ -105,14 +105,6 @@ jobs:
 
           echo "== Container status =="
           docker ps -a | sed -n '1,10p'
-          docker inspect -f 'State={{json .State}}' signum-agent
-
-          echo "== If the container exited, dump logs now =="
-          if [ "$(docker inspect -f '{{.State.Running}}' signum-agent)" != "true" ]; then
-            echo "Container is not running. Logs:"
-            docker logs signum-agent || true
-            exit 1
-          fi
 
           echo "== List certs (signum-util lc) =="
           docker exec signum-agent signum-util lc | tee signum-certs.txt
