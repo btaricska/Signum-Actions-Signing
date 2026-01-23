@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # ✅ Set ONE image reference and use it everywhere
       SIGNUM_AGENT_IMAGE: repo.keyfactor.com/images/signum-agent:4.60.2
+      SIGNUM_REGISTRY: repo.keyfactor.com
 
     steps:
       - name: Checkout
@@ -27,20 +29,19 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Signum Container Agent with Signing Tools – Support / Usage Notes
 
-          Signum Container Agent with Signing Tools is open source and supported on a best effort level for this set of examples. This means customers can report Bugs, Feature Requests, Documentation amendment or questions as well as requests for customer information required for setup that needs Keyfactor access to obtain. Such requests do not follow normal SLA commitments for response or resolution.
-
-          If you have a support issue, please open a support ticket via the Keyfactor Support Portal:
-          https://support.keyfactor.com/
+          Signum Container Agent with Signing Tools is open source and supported on a best effort level for this set of examples.
+          Support issues: https://support.keyfactor.com/
           EOF
 
-      - name: Configure Docker auth for JFrog Artifactory
+      - name: Configure Docker auth for JFrog Artifactory (repo.keyfactor.com)
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p ~/.docker
           cat > ~/.docker/config.json <<EOF
           {
             "auths": {
-              "repo.keyfactor.com": {
+              "${SIGNUM_REGISTRY}": {
                 "auth": "${{ secrets.JFROG_DOCKER_AUTH }}",
                 "email": "youremail@email.com"
               }
@@ -48,7 +49,14 @@ jobs:
           }
           EOF
 
-          echo "Docker auth configured for repo.keyfactor.com"
+          echo "== Docker config written =="
+          # Show registry keys only (no secrets)
+          python3 - <<'PY'
+          import json, os
+          with open(os.path.expanduser("~/.docker/config.json")) as f:
+              cfg=json.load(f)
+          print("auths keys:", list(cfg.get("auths", {}).keys()))
+          PY
 
       - name: Run Signum Agent container and list available certs (debug)
         shell: bash
@@ -63,17 +71,23 @@ jobs:
           echo "== Basic checks =="
           echo "Runner: $(uname -a)"
           echo "Docker: $(docker --version)"
-          echo "Using image: ${SIGNUM_AGENT_IMAGE}"
           echo "SIGNUM_HOSTNAME set? $([[ -n "${SIGNUM_HOSTNAME:-}" ]] && echo yes || echo no)"
           echo "SIGNUM_CLIENTID set? $([[ -n "${SIGNUM_CLIENTID:-}" ]] && echo yes || echo no)"
           echo "SIGNUM_USERNAME set? $([[ -n "${SIGNUM_USERNAME:-}" ]] && echo yes || echo no)"
           echo "SIGNUM_PASSWORD set? $([[ -n "${SIGNUM_PASSWORD:-}" ]] && echo yes || echo no)"
+
+          echo "== Image ref we will use (pull+run) =="
+          echo "${SIGNUM_AGENT_IMAGE}"
 
           echo "== Ensure there is something to sign =="
           mkdir -p filestosign
           if [ ! -f "filestosign/example-script.ps1" ]; then
             echo 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
           fi
+
+          echo "== Validate image ref (manifest) =="
+          # This fails fast if the ref is malformed OR auth doesn't work
+          docker manifest inspect "${SIGNUM_AGENT_IMAGE}" >/dev/null
 
           echo "== Pull Signum agent image =="
           docker pull "${SIGNUM_AGENT_IMAGE}"
@@ -91,6 +105,14 @@ jobs:
 
           echo "== Container status =="
           docker ps -a | sed -n '1,10p'
+          docker inspect -f 'State={{json .State}}' signum-agent
+
+          echo "== If the container exited, dump logs now =="
+          if [ "$(docker inspect -f '{{.State.Running}}' signum-agent)" != "true" ]; then
+            echo "Container is not running. Logs:"
+            docker logs signum-agent || true
+            exit 1
+          fi
 
           echo "== List certs (signum-util lc) =="
           docker exec signum-agent signum-util lc | tee signum-certs.txt
