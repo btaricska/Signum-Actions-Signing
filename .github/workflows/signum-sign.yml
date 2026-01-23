@@ -7,9 +7,15 @@ on:
     paths:
       - "filestosign/**"
 
+permissions:
+  contents: read
+
 jobs:
   sign:
     runs-on: ubuntu-latest
+
+    env:
+      SIGNUM_AGENT_IMAGE: repo.keyfactor.com/images/signum-agent:4.60.2
 
     steps:
       - name: Checkout
@@ -25,10 +31,24 @@ jobs:
 
           If you have a support issue, please open a support ticket via the Keyfactor Support Portal:
           https://support.keyfactor.com/
-
-          To report a problem or suggest a new feature, use the Issues tab.
-          If you want to contribute bug fixes or enhancements, use the Pull requests tab.
           EOF
+
+      - name: Configure Docker auth for JFrog Artifactory
+        shell: bash
+        run: |
+          mkdir -p ~/.docker
+          cat > ~/.docker/config.json <<EOF
+          {
+            "auths": {
+              "repo.keyfactor.com": {
+                "auth": "${{ secrets.JFROG_DOCKER_AUTH }}",
+                "email": "youremail@email.com"
+              }
+            }
+          }
+          EOF
+
+          echo "Docker auth configured for repo.keyfactor.com"
 
       - name: Run Signum Agent container and list available certs (debug)
         shell: bash
@@ -43,6 +63,7 @@ jobs:
           echo "== Basic checks =="
           echo "Runner: $(uname -a)"
           echo "Docker: $(docker --version)"
+          echo "Using image: ${SIGNUM_AGENT_IMAGE}"
           echo "SIGNUM_HOSTNAME set? $([[ -n "${SIGNUM_HOSTNAME:-}" ]] && echo yes || echo no)"
           echo "SIGNUM_CLIENTID set? $([[ -n "${SIGNUM_CLIENTID:-}" ]] && echo yes || echo no)"
           echo "SIGNUM_USERNAME set? $([[ -n "${SIGNUM_USERNAME:-}" ]] && echo yes || echo no)"
@@ -55,8 +76,8 @@ jobs:
           fi
 
           echo "== Pull Signum agent image =="
-          # If this fails, it's almost always registry auth/permissions.
-          docker pull repo.keyfactor.com/images/signum-agent:latest
+          docker pull "${SIGNUM_AGENT_IMAGE}"
+
           echo "== Run container =="
           docker run --name signum-agent -d \
             -v "$PWD/filestosign:/mnt/filestosign" \
@@ -66,18 +87,10 @@ jobs:
             -e "SIGNUM_PASSWORD=$SIGNUM_PASSWORD" \
             -e "SIGNUM_LOGLEVEL=HIGH" \
             -e "SIGNUM_LOGTYPE=FILE" \
-            repo.keyfactor.com/images/signum-agent:4.60.2
+            "${SIGNUM_AGENT_IMAGE}"
 
           echo "== Container status =="
           docker ps -a | sed -n '1,10p'
-          docker inspect -f 'State={{json .State}}' signum-agent
-
-          echo "== If the container exited, dump logs now =="
-          if [ "$(docker inspect -f '{{.State.Running}}' signum-agent)" != "true" ]; then
-            echo "Container is not running. Logs:"
-            docker logs signum-agent || true
-            exit 1
-          fi
 
           echo "== List certs (signum-util lc) =="
           docker exec signum-agent signum-util lc | tee signum-certs.txt
