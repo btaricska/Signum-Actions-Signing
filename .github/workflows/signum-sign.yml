@@ -56,8 +56,7 @@ jobs:
 
           echo "== Pull Signum agent image =="
           # If this fails, it's almost always registry auth/permissions.
-          docker pull repo.keyfactor.com/images/signum-agent:4.60.2
-
+          docker pull repo.keyfactor.com/images/signum-agent:latest
           echo "== Run container =="
           docker run --name signum-agent -d \
             -v "$PWD/filestosign:/mnt/filestosign" \
