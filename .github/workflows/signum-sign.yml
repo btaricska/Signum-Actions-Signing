@@ -48,10 +48,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "== Basic checks =="
-          echo "Runner: $(uname -a)"
-          echo "Docker: $(docker --version)"
-
           echo "== Using image =="
           echo "${SIGNUM_AGENT_IMAGE}"
 
@@ -74,9 +70,6 @@ jobs:
             -e "SIGNUM_LOGLEVEL=HIGH" \
             -e "SIGNUM_LOGTYPE=FILE" \
             "${SIGNUM_AGENT_IMAGE}"
-
-          echo "== Container status =="
-          docker ps -a | sed -n '1,10p'
 
           echo "== List certs (signum-util lc) =="
           docker exec signum-agent signum-util lc | tee signum-certs.txt
