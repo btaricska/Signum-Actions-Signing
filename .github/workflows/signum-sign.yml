@@ -1,12 +1,12 @@
-name: Sign with Signum Linux Agent (cosign + PKCS11) on Windows runner
+name: Sign document with Signum Container Agent (basic)
 
 on:
   workflow_dispatch:
     inputs:
-      signum_linux_agent_image:
-        description: "OCI image to use (repo/path:tag)"
+      signum_agent_image:
+        description: "Container image to use include tag"
         required: false
-        default: "keyfactor.jfrog.io/signum-con-dev/keyfactor/signum-linux-agent:3.72.2-cosign"
+        default: "keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1"
   push:
     branches: ["main"]
     paths:
@@ -18,12 +18,11 @@ permissions:
 
 jobs:
   sign:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     env:
       SIGNUM_REGISTRY: keyfactor.jfrog.io
-      DEFAULT_SIGNUM_LINUX_AGENT_IMAGE: keyfactor.jfrog.io/signum-con-dev/keyfactor/signum-linux-agent:3.72.2-cosign
-
-      PKCS11_WORK_DIR: pkcs11-work
+      DEFAULT_SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
+      PKCS11_REPO_MODULE: pkcs11/signum-pkcs11.so
       PKCS11_WORK_MODULE: pkcs11-work/signum-pkcs11.so
       PKCS11_MOUNT_PATH: /pkcs11/signum-pkcs11.so
 
@@ -31,7 +30,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Docker login (JFrog)
+      - name: Notes Support Disclaimer
+        shell: bash
+        run: |
+          echo "## Signum Container Agent Support Usage Notes" >> "$GITHUB_STEP_SUMMARY"
+          echo "Support issues https://support.keyfactor.com/" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Docker login keyfactor jfrog io
         uses: docker/login-action@v3
         with:
           registry: ${{ env.SIGNUM_REGISTRY }}
@@ -39,123 +44,179 @@ jobs:
           password: ${{ secrets.JFROG_TOKEN }}
           logout: true
 
-      - name: Resolve agent image
+      - name: Resolve agent image ref
         id: img
-        shell: pwsh
+        shell: bash
         run: |
-          $img = '${{ inputs.signum_linux_agent_image }}'
-          if ([string]::IsNullOrWhiteSpace($img)) { $img = $env:DEFAULT_SIGNUM_LINUX_AGENT_IMAGE }
-          "image=$img" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "Using image: $img"
+          set -euo pipefail
+          IMG="${{ inputs.signum_agent_image }}"
+          if [ -z "${IMG}" ]; then
+            IMG="${DEFAULT_SIGNUM_AGENT_IMAGE}"
+          fi
+          echo "image=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "Using agent image ${IMG}"
 
-      - name: Prepare PKCS11 module (required)
-        shell: pwsh
-        env:
-          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNUM_PKCS11_MODULE_B64)) {
-            throw "SIGNUM_PKCS11_MODULE_B64 secret is missing (base64 of the PKCS#11 .so)."
-          }
-          New-Item -ItemType Directory -Force -Path $env:PKCS11_WORK_DIR | Out-Null
-          $bytes = [Convert]::FromBase64String($env:SIGNUM_PKCS11_MODULE_B64)
-          [System.IO.File]::WriteAllBytes($env:PKCS11_WORK_MODULE, $bytes)
-          $fi = Get-Item $env:PKCS11_WORK_MODULE
-          "PKCS11 module written: $($fi.FullName) ($($fi.Length) bytes)"
-
-      - name: Start Signum Linux Agent (container)
-        shell: pwsh
+      - name: Run Signum Agent container and PKCS11 slot listing
+        shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           SIGNUM_AGENT_IMAGE: ${{ steps.img.outputs.image }}
-        run: |
-          # Convert Windows path to Docker-friendly /c/... style for bind mounts
-          $moduleWin = (Resolve-Path $env:PKCS11_WORK_MODULE).Path
-          $moduleDocker = ($moduleWin -replace '\\','/')
-          if ($moduleDocker -match '^([A-Za-z]):/(.*)$') {
-            $moduleDocker = "/$($matches[1].ToLower())/$($matches[2])"
-          }
-
-          docker pull $env:SIGNUM_AGENT_IMAGE
-          docker rm -f signum-agent *> $null 2>&1
-
-          docker run --name signum-agent -d `
-            -e SIGNUM_HOSTNAME `
-            -e SIGNUM_CLIENTID `
-            -e SIGNUM_USERNAME `
-            -e SIGNUM_PASSWORD `
-            -e SIGNUM_LOGLEVEL=HIGH `
-            -e SIGNUM_LOGTYPE=FILE `
-            -v "$moduleDocker`:$($env:PKCS11_MOUNT_PATH):ro" `
-            $env:SIGNUM_AGENT_IMAGE
-
-          docker ps -a --no-trunc | Select-Object -First 25
-          Start-Sleep -Seconds 3
-
-      - name: PKCS11 token + key discovery (cosign pkcs11-tool)
-        shell: pwsh
-        env:
           SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
+          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
         run: |
-          if (Test-Path "pkcs11-discovery.txt") { Remove-Item "pkcs11-discovery.txt" -Force }
+          set -euo pipefail
 
-          "== Tokens ==" | Out-File -FilePath "pkcs11-discovery.txt" -Append -Encoding utf8
-          docker exec signum-agent cosign pkcs11-tool list-tokens --module "$env:PKCS11_MOUNT_PATH" 2>&1 |
-            Tee-Object -FilePath "pkcs11-discovery.txt" -Append
+          echo "== Basic checks ==" | tee basic-checks.txt
+          echo "Runner: $(uname -a)" | tee -a basic-checks.txt
+          echo "Docker: $(docker --version)" | tee -a basic-checks.txt
+          echo "SIGNUM_HOSTNAME set? $([[ -n "${SIGNUM_HOSTNAME:-}" ]] && echo yes || echo no)" | tee -a basic-checks.txt
+          echo "SIGNUM_CLIENTID set? $([[ -n "${SIGNUM_CLIENTID:-}" ]] && echo yes || echo no)" | tee -a basic-checks.txt
+          echo "SIGNUM_USERNAME set? $([[ -n "${SIGNUM_USERNAME:-}" ]] && echo yes || echo no)" | tee -a basic-checks.txt
+          echo "SIGNUM_PASSWORD set? $([[ -n "${SIGNUM_PASSWORD:-}" ]] && echo yes || echo no)" | tee -a basic-checks.txt
+          echo "Image: ${SIGNUM_AGENT_IMAGE}" | tee -a basic-checks.txt
 
-          "" | Out-File -FilePath "pkcs11-discovery.txt" -Append -Encoding utf8
-          "== Key URIs ==" | Out-File -FilePath "pkcs11-discovery.txt" -Append -Encoding utf8
-          # If PIN is required to enumerate keys, cosign uses the token with the module; PIN handling varies by provider.
-          # If your provider requires login for listing keys, keep SIGNUM_PKCS11_PIN set and put it in the URI or provider config.
-          docker exec signum-agent cosign pkcs11-tool list-keys-uris --module "$env:PKCS11_MOUNT_PATH" 2>&1 |
-            Tee-Object -FilePath "pkcs11-discovery.txt" -Append
+          echo "== Ensure there is something to sign ==" | tee ensure-file.txt
+          mkdir -p filestosign
+          if [ ! -f "filestosign/example-script.ps1" ]; then
+            printf '%s\n' 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
+          fi
+          ls -la filestosign/example-script.ps1 | tee -a ensure-file.txt
 
-      - name: Sign blobs in filestosign/ using cosign + PKCS11
-        shell: pwsh
-        env:
-          # Store the selected key URI as a secret, e.g.:
-          # pkcs11:token=...;object=...;type=private
-          COSIGN_PKCS11_KEY_URI: ${{ secrets.COSIGN_PKCS11_KEY_URI }}
-          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:COSIGN_PKCS11_KEY_URI)) {
-            throw "Missing COSIGN_PKCS11_KEY_URI secret. Use pkcs11-discovery.txt output to choose one."
-          }
+          echo "== Pull Signum agent image ==" | tee docker-pull.txt
+          docker pull "${SIGNUM_AGENT_IMAGE}" 2>&1 | tee -a docker-pull.txt
 
-          $files = Get-ChildItem -Path "filestosign" -Recurse -File
-          if (-not $files -or $files.Count -eq 0) {
-            "No files found under filestosign/." | Tee-Object -FilePath signing.log
-            exit 0
-          }
+          echo "== Run container ==" | tee docker-run.txt
+          docker rm -f signum-agent >/dev/null 2>&1 || true
+          docker run --name signum-agent -d \
+            -p 8080:8080 \
+            -p 5000:5000 \
+            -p 7000:7000 \
+            -v "$PWD/filestosign:/mnt/filestosign" \
+            -e "SIGNUM_HOSTNAME=$SIGNUM_HOSTNAME" \
+            -e "SIGNUM_CLIENTID=$SIGNUM_CLIENTID" \
+            -e "SIGNUM_USERNAME=$SIGNUM_USERNAME" \
+            -e "SIGNUM_PASSWORD=$SIGNUM_PASSWORD" \
+            -e "SIGNUM_LOGLEVEL=HIGH" \
+            -e "SIGNUM_LOGTYPE=FILE" \
+            "${SIGNUM_AGENT_IMAGE}" | tee -a docker-run.txt
 
-          foreach ($f in $files) {
-            $inContainer = "/work/$($f.FullName -replace '\\','/' )"
-            $sigOut = "$inContainer.sig"
-            $crtOut = "$inContainer.crt"
+          docker ps -a | sed -n '1,25p' | tee signum-container-status.txt
+          docker port signum-agent | tee signum-container-ports.txt || true
 
-            "Signing: $($f.FullName)" | Tee-Object -FilePath signing.log -Append
+          echo "== Wait briefly for service startup ==" | tee startup-wait.txt
+          sleep 3
 
-            # Run cosign inside the container with the repo mounted at /work
-            docker exec -e COSIGN_PKCS11_MODULE_PATH="$env:PKCS11_MOUNT_PATH" `
-                        -e SIGNUM_PKCS11_PIN="$env:SIGNUM_PKCS11_PIN" `
-                        signum-agent `
-                        sh -lc "cosign sign-blob --key '$env:COSIGN_PKCS11_KEY_URI' --output-signature '$sigOut' --output-certificate '$crtOut' '$inContainer'" 2>&1 |
-              Tee-Object -FilePath signing.log -Append
-          }
+          echo "== Probe agent HTTP endpoints best effort ==" | tee signum-api-probe.txt
+          : > signum-api-probe.txt
+          for port in 8080 5000 7000; do
+            for path in /swagger /swagger/index.html /health /healthz /api/health /api/status /; do
+              url="http://127.0.0.1:${port}${path}"
+              code="$(curl -s -o /dev/null -w '%{http_code}' "${url}" || true)"
+              printf '%s\n' "${code} ${url}" | tee -a signum-api-probe.txt
+            done
+          done
 
-      - name: Collect agent logs
+          echo "== Attempt cert listing via likely API routes best effort ==" | tee signum-certs.txt
+          : > signum-certs.txt
+          set +e
+          for port in 8080 5000 7000; do
+            for path in /api/certificates /api/certs /api/v1/certificates /api/v1/certs /certificates /certs /swagger/v1/swagger.json; do
+              url="http://127.0.0.1:${port}${path}"
+              printf '%s\n' "== GET ${url} ==" | tee -a signum-certs.txt
+              curl -sS "${url}" | head -c 20000 | tee -a signum-certs.txt
+              printf '\n' | tee -a signum-certs.txt
+            done
+          done
+          set -e
+
+          echo "== Prepare PKCS11 module ==" | tee pkcs11-module-prep.txt
+          mkdir -p pkcs11-work
+
+          MODULE_ON_DISK=""
+
+          if [ -f "${PKCS11_REPO_MODULE}" ]; then
+            MODULE_ON_DISK="${PKCS11_REPO_MODULE}"
+            echo "Using PKCS11 module from repo ${PKCS11_REPO_MODULE}" | tee -a pkcs11-module-prep.txt
+          elif [ -n "${SIGNUM_PKCS11_MODULE_B64:-}" ]; then
+            echo "Using PKCS11 module from secret SIGNUM_PKCS11_MODULE_B64" | tee -a pkcs11-module-prep.txt
+            printf '%s' "${SIGNUM_PKCS11_MODULE_B64}" | base64 -d > "${PKCS11_WORK_MODULE}"
+            chmod 755 "${PKCS11_WORK_MODULE}" || true
+            MODULE_ON_DISK="${PKCS11_WORK_MODULE}"
+          else
+            echo "No PKCS11 module available. Provide pkcs11/signum-pkcs11.so in repo or secret SIGNUM_PKCS11_MODULE_B64" | tee -a pkcs11-module-prep.txt
+          fi
+
+          if [ -n "${MODULE_ON_DISK}" ]; then
+            file "${MODULE_ON_DISK}" | tee pkcs11-module-file.txt || true
+            ls -la "${MODULE_ON_DISK}" | tee pkcs11-module-ls.txt || true
+          fi
+
+          echo "== PKCS11 slot listing using OpenSC helper container ==" | tee pkcs11-slots.txt
+          : > pkcs11-slots.txt
+
+          if [ -z "${MODULE_ON_DISK}" ]; then
+            echo "PKCS11 module not found so slot listing cannot run" | tee -a pkcs11-slots.txt
+          else
+            docker pull ghcr.io/open-sc/opensc:latest >/dev/null 2>&1 || true
+
+            docker run --rm \
+              -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
+              ghcr.io/open-sc/opensc:latest \
+              pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots 2>&1 | tee -a pkcs11-slots.txt || true
+
+            echo "" | tee -a pkcs11-slots.txt
+            echo "== PKCS11 cert objects no login ==" | tee -a pkcs11-slots.txt
+            docker run --rm \
+              -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
+              ghcr.io/open-sc/opensc:latest \
+              pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
+
+            if [ -n "${SIGNUM_PKCS11_PIN:-}" ]; then
+              echo "" | tee -a pkcs11-slots.txt
+              echo "== PKCS11 cert objects with login ==" | tee -a pkcs11-slots.txt
+              docker run --rm \
+                -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
+                ghcr.io/open-sc/opensc:latest \
+                pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --login --pin "${SIGNUM_PKCS11_PIN}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
+            else
+              echo "" | tee -a pkcs11-slots.txt
+              echo "SIGNUM_PKCS11_PIN not set skipping logged in listing" | tee -a pkcs11-slots.txt
+            fi
+          fi
+
+          echo "== Agent logs tail ==" | tee signum-agent.log
+          docker logs signum-agent | tail -n 500 | tee signum-agent.log || true
+
+          echo "### Signum outputs" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** \`${SIGNUM_AGENT_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "#### API probe" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '1,160p' signum-api-probe.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "#### PKCS11 slot listing truncated" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '1,200p' pkcs11-slots.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "#### Agent logs tail" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 200 signum-agent.log >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          exit 0
+
+      - name: Cleanup container
         if: always()
-        shell: pwsh
+        shell: bash
         run: |
-          docker logs signum-agent | Select-Object -Last 300 | Tee-Object -FilePath signum-agent.log
-
-      - name: Cleanup
-        if: always()
-        shell: pwsh
-        run: |
-          docker rm -f signum-agent *> $null 2>&1
+          docker rm -f signum-agent >/dev/null 2>&1 || true
 
       - name: Upload output
         if: always()
@@ -164,8 +225,17 @@ jobs:
           name: signum-output
           if-no-files-found: ignore
           path: |
-            pkcs11-discovery.txt
-            signing.log
+            basic-checks.txt
+            docker-pull.txt
+            docker-run.txt
+            signum-container-status.txt
+            signum-container-ports.txt
+            signum-api-probe.txt
+            signum-certs.txt
+            pkcs11-module-prep.txt
+            pkcs11-module-file.txt
+            pkcs11-module-ls.txt
+            pkcs11-slots.txt
             signum-agent.log
-            filestosign/**
+            filestosign/example-script.ps1
             pkcs11-work/**
