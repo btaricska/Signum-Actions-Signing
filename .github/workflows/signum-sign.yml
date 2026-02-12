@@ -1,11 +1,17 @@
-name: Sign document with Signum Container Agent (basic)
+name: Sign document with Signum Container Agent (PKCS11)
 
 on:
   workflow_dispatch:
+    inputs:
+      signum_agent_image:
+        description: "Container image to use (include tag)"
+        required: false
+        default: "keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1"
   push:
     branches: ["main"]
     paths:
       - "filestosign/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: read
@@ -13,73 +19,118 @@ permissions:
 jobs:
   sign:
     runs-on: ubuntu-latest
-
     env:
-      SIGNUM_REGISTRY: repo.keyfactor.com
-      SIGNUM_AGENT_IMAGE: repo.keyfactor.com/dev-oci/signum-agent:3.80.4-2024052902
+      SIGNUM_REGISTRY: keyfactor.jfrog.io
+      DEFAULT_SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
+      PKCS11_WORK_DIR: pkcs11-work
+      PKCS11_WORK_MODULE: pkcs11-work/signum-pkcs11.so
+      PKCS11_MOUNT_PATH: /pkcs11/signum-pkcs11.so
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Notes / Support Disclaimer
+      - name: Notes Support Disclaimer
         shell: bash
         run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          ## Signum Container Agent with Signing Tools – Support / Usage Notes
-          Support issues: https://support.keyfactor.com/
-          EOF
+          echo "## Signum Container Agent Support Usage Notes" >> "$GITHUB_STEP_SUMMARY"
+          echo "Support issues https://support.keyfactor.com/" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Docker login to JFrog Artifactory
+      - name: Docker login keyfactor jfrog io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SIGNUM_REGISTRY }}
+          username: ${{ secrets.JFROG_USERNAME }}
+          password: ${{ secrets.JFROG_TOKEN }}
+          logout: true
+
+      - name: Resolve agent image
+        id: img
         shell: bash
         run: |
           set -euo pipefail
-          echo "${{ secrets.JFROG_DOCKER_PASSWORD }}" | docker login "${SIGNUM_REGISTRY}" \
-            -u "${{ secrets.JFROG_DOCKER_USERNAME }}" \
-            --password-stdin
+          IMG="${{ inputs.signum_agent_image }}"
+          if [ -z "${IMG}" ]; then
+            IMG="${DEFAULT_SIGNUM_AGENT_IMAGE}"
+          fi
+          echo "image=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "Using image: ${IMG}"
 
-      - name: Pull + run Signum Agent container and list available certs
+      - name: Prepare PKCS11 module (required)
+        shell: bash
+        env:
+          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNUM_PKCS11_MODULE_B64:-}" ]; then
+            echo "ERROR: SIGNUM_PKCS11_MODULE_B64 secret is missing."
+            echo "Add a repository secret containing base64 of the Signum PKCS11 .so."
+            exit 1
+          fi
+          mkdir -p "${PKCS11_WORK_DIR}"
+          printf '%s' "${SIGNUM_PKCS11_MODULE_B64}" | base64 -d > "${PKCS11_WORK_MODULE}"
+          chmod 755 "${PKCS11_WORK_MODULE}"
+          file "${PKCS11_WORK_MODULE}" || true
+          ls -la "${PKCS11_WORK_MODULE}" || true
+
+      - name: Start Signum Agent container
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+          SIGNUM_AGENT_IMAGE: ${{ steps.img.outputs.image }}
         run: |
           set -euo pipefail
+          docker pull "${SIGNUM_AGENT_IMAGE}"
+          docker rm -f signum-agent >/dev/null 2>&1 || true
+          docker run --name signum-agent -d \
+            -p 8080:8080 \
+            -e SIGNUM_HOSTNAME \
+            -e SIGNUM_CLIENTID \
+            -e SIGNUM_USERNAME \
+            -e SIGNUM_PASSWORD \
+            -e SIGNUM_LOGLEVEL=HIGH \
+            -e SIGNUM_LOGTYPE=FILE \
+            "${SIGNUM_AGENT_IMAGE}"
+          docker ps -a --no-trunc | sed -n '1,25p'
+          sleep 3
 
-          echo "== Using image =="
-          echo "${SIGNUM_AGENT_IMAGE}"
-
-          echo "== Ensure there is something to sign =="
-          mkdir -p filestosign
-          if [ ! -f "filestosign/example-script.ps1" ]; then
-            echo 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
+      - name: PKCS11 slot and certificate listing
+        shell: bash
+        env:
+          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/open-sc/opensc:latest >/dev/null 2>&1 || true
+          echo "== PKCS11 slots ==" > pkcs11-slots.txt
+          docker run --rm \
+            -v "$PWD/${PKCS11_WORK_MODULE}:${PKCS11_MOUNT_PATH}:ro" \
+            ghcr.io/open-sc/opensc:latest \
+            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots 2>&1 | tee -a pkcs11-slots.txt
+          echo "" | tee -a pkcs11-slots.txt
+          echo "== PKCS11 cert objects (no login) ==" | tee -a pkcs11-slots.txt
+          docker run --rm \
+            -v "$PWD/${PKCS11_WORK_MODULE}:${PKCS11_MOUNT_PATH}:ro" \
+            ghcr.io/open-sc/opensc:latest \
+            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
+          if [ -n "${SIGNUM_PKCS11_PIN:-}" ]; then
+            echo "" | tee -a pkcs11-slots.txt
+            echo "== PKCS11 cert objects (login) ==" | tee -a pkcs11-slots.txt
+            docker run --rm \
+              -v "$PWD/${PKCS11_WORK_MODULE}:${PKCS11_MOUNT_PATH}:ro" \
+              ghcr.io/open-sc/opensc:latest \
+              pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --login --pin "${SIGNUM_PKCS11_PIN}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
           fi
 
-          echo "== Pull Signum agent image =="
-          docker pull "${SIGNUM_AGENT_IMAGE}"
+      - name: Collect agent logs
+        if: always()
+        shell: bash
+        run: |
+          docker logs signum-agent | tail -n 300 | tee signum-agent.log || true
 
-          echo "== Run container =="
-          docker run --name signum-agent -d \
-            -v "$PWD/filestosign:/mnt/filestosign" \
-            -e "SIGNUM_HOSTNAME=$SIGNUM_HOSTNAME" \
-            -e "SIGNUM_CLIENTID=$SIGNUM_CLIENTID" \
-            -e "SIGNUM_USERNAME=$SIGNUM_USERNAME" \
-            -e "SIGNUM_PASSWORD=$SIGNUM_PASSWORD" \
-            -e "SIGNUM_LOGLEVEL=HIGH" \
-            -e "SIGNUM_LOGTYPE=FILE" \
-            "${SIGNUM_AGENT_IMAGE}"
-
-          echo "== List certs (signum-util lc) =="
-          docker exec signum-agent signum-util lc | tee signum-certs.txt
-
-          echo "### Signum cert listing (signum-util lc)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat signum-certs.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Cleanup container
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
@@ -90,6 +141,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signum-output
+          if-no-files-found: ignore
           path: |
-            signum-certs.txt
+            pkcs11-slots.txt
+            signum-agent.log
             filestosign/example-script.ps1
+            pkcs11-work/**
