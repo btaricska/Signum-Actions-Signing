@@ -22,14 +22,12 @@ jobs:
       # ============================================================
       # CHECKOUT REPO
       # ============================================================
-
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
       # VALIDATE REQUIRED SECRETS
       # ============================================================
-
       - name: Validate Signum & JFrog secrets
         shell: bash
         env:
@@ -51,7 +49,6 @@ jobs:
       # ============================================================
       # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
       # ============================================================
-
       - name: Configure Docker auth
         shell: bash
         env:
@@ -71,7 +68,6 @@ jobs:
       # ============================================================
       # RUN SIGNUM AGENT
       # ============================================================
-
       - name: Run Signum Agent
         shell: bash
         env:
@@ -98,9 +94,8 @@ jobs:
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE JSON FILE TO SIGN
+      # CREATE TEMPORARY JSON FILE TO SIGN
       # ============================================================
-
       - name: Create JSON file to sign
         shell: bash
         run: |
@@ -109,10 +104,9 @@ jobs:
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$TMP_DIR/file.json"
 
       # ============================================================
-      # SIGN JSON FILE USING FIRST AVAILABLE PKCS11 KEY
+      # SIGN FILE USING PKCS11 VIA SIGNUM AGENT
       # ============================================================
-
-      - name: Sign JSON file using PKCS11 via Signum Agent
+      - name: Sign JSON file using PKCS11
         shell: bash
         env:
           FILES_DIR: filestosign
@@ -123,23 +117,28 @@ jobs:
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          # Find first slot with a present token
-          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots \
+          echo "🔍 Finding first slot with a present token..."
+          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool \
+                 --module /usr/lib/libkeyfactorpkcs11.so --list-slots \
                  | grep "Slot" | head -n1 | awk '{print $2}')
           if [ -z "$SLOT" ]; then
             echo "❌ No slot with a present token found"
             exit 1
           fi
+          echo "✅ Found slot: $SLOT"
 
-          # Find first private key ID in that slot
-          KEY_ID=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so \
-                   --slot $SLOT --list-objects --type privkey | grep "ID:" | head -n1 | awk '{print $2}')
+          echo "🔑 Finding first private key in slot $SLOT..."
+          KEY_ID=$(docker exec $CONTAINER_NAME pkcs11-tool \
+                   --module /usr/lib/libkeyfactorpkcs11.so \
+                   --slot $SLOT --list-objects --type privkey \
+                   | grep "ID:" | head -n1 | awk '{print $2}')
           if [ -z "$KEY_ID" ]; then
             echo "❌ No private key found in slot $SLOT"
             exit 1
           fi
+          echo "✅ Found private key ID: $KEY_ID"
 
-          # Sign the JSON file
+          echo "✍️ Signing JSON file..."
           docker exec $CONTAINER_NAME pkcs11-tool \
             --module /usr/lib/libkeyfactorpkcs11.so \
             --slot $SLOT \
