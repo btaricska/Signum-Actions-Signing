@@ -1,10 +1,9 @@
 name: Sign File via Signum Agent + PKCS11
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -15,7 +14,6 @@ jobs:
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
       PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
@@ -91,22 +89,21 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
+            -v $GITHUB_WORKSPACE/tmp-files:/mnt/tmp-files \
             $SIGNUM_AGENT_IMAGE
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE FILE TO SIGN
+      # CREATE FILE TO SIGN (WRITABLE DIRECTORY)
       # ============================================================
 
       - name: Create file to sign
         shell: bash
         run: |
-          mkdir -p "$FILES_DIR"
-          # Ensure the directory is writable by the runner
-          chmod 777 "$FILES_DIR" || true
-          echo "Hello from Signum + PKCS11 demo" > "$FILES_DIR/file.txt"
+          TMP_DIR="$GITHUB_WORKSPACE/tmp-files"
+          mkdir -p "$TMP_DIR"
+          echo "Hello from Signum + PKCS11 demo" > "$TMP_DIR/file.txt"
 
       # ============================================================
       # SIGN FILE USING SIGNUM AGENT + PKCS11
@@ -115,15 +112,13 @@ jobs:
       - name: Sign files with Signum Agent
         shell: bash
         run: |
-          for f in $FILES_DIR/*; do
-            echo "Signing $f ..."
-            docker exec $CONTAINER_NAME pkcs11-tool \
-              --module $PKCS11_LIB \
-              --sign \
-              --input-file "/mnt/$FILES_DIR/$(basename $f)" \
-              --output-file "/mnt/$FILES_DIR/$(basename $f).sig" \
-              --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
-          done
+          TMP_DIR="$GITHUB_WORKSPACE/tmp-files"
+          docker exec $CONTAINER_NAME pkcs11-tool \
+            --module $PKCS11_LIB \
+            --sign \
+            --input-file "/mnt/tmp-files/file.txt" \
+            --output-file "/mnt/tmp-files/file.txt.sig" \
+            --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
 
       # ============================================================
       # UPLOAD SIGNED FILES AS ARTIFACTS
@@ -133,4 +128,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: "$FILES_DIR/*.sig"
+          path: "$GITHUB_WORKSPACE/tmp-files/*.sig"
