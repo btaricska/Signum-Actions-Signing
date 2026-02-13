@@ -66,7 +66,7 @@ jobs:
         EOF
 
     # ============================================================
-    # Start Signum Agent
+    # Start Signum Agent container
     # ============================================================
     - name: Start Signum Agent
       shell: bash
@@ -88,10 +88,11 @@ jobs:
           -e SIGNUM_PASSWORD \
           -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
           $SIGNUM_AGENT_IMAGE
-
         echo "⏳ Waiting for PKCS11 module to become ready..."
         for i in {1..30}; do
-          if docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots >/dev/null 2>&1; then
+          if docker exec $CONTAINER_NAME pkcs11-tool \
+               --module /usr/lib/libkeyfactorpkcs11.so \
+               --list-slots >/dev/null 2>&1; then
             echo "✅ PKCS11 module is ready"
             break
           fi
@@ -100,7 +101,7 @@ jobs:
         docker logs $CONTAINER_NAME | tail -n 20
 
     # ============================================================
-    # Create JSON file
+    # Create JSON file to sign
     # ============================================================
     - name: Create JSON file to sign
       shell: bash
@@ -110,9 +111,9 @@ jobs:
         echo "✅ JSON file created"
 
     # ============================================================
-    # PKCS11 Signing
+    # Sign the file using PKCS#11 module
     # ============================================================
-    - name: Sign JSON via PKCS11
+    - name: Sign file via PKCS11
       shell: bash
       run: |
         set -euo pipefail
@@ -121,17 +122,28 @@ jobs:
         CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
         CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-        # Verify input file
-        docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
+        # --------------------------------------------------------
+        # Step 1: Verify input file exists inside the container
+        # --------------------------------------------------------
+        echo "🔎 Verifying input file exists inside the container..."
+        docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || {
+          echo "❌ Input file not found inside container"
+          exit 1
+        }
         echo "✅ Input file exists"
 
-        # List all slots for debugging
+        # --------------------------------------------------------
+        # Step 2: List all available slots
+        # --------------------------------------------------------
         echo "🔍 Listing all Keyfactor slots..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots
 
-        # Detect first initialized token slot
+        # --------------------------------------------------------
+        # Step 3: Detect the first initialized token slot
+        # --------------------------------------------------------
+        echo "🔍 Detecting the first initialized token slot..."
         SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots \
-              | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
+                | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
 
         if [ -z "${SLOT:-}" ]; then
           echo "❌ No initialized token slot found"
@@ -139,13 +151,30 @@ jobs:
         fi
         echo "✅ Using slot: $SLOT"
 
-        # List private keys and associated certs
-        echo "🔑 Listing all private keys and associated certs in slot..."
+        # --------------------------------------------------------
+        # Step 4: List all objects (private keys, certificates, etc.) in the slot
+        # --------------------------------------------------------
+        echo "🔑 Listing all objects in slot $SLOT..."
+        docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects
+
+        # --------------------------------------------------------
+        # Step 5: List all private keys in the slot
+        # --------------------------------------------------------
+        echo "🔑 Listing private keys in slot $SLOT..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey
+
+        # --------------------------------------------------------
+        # Step 6: List all certificates in the slot
+        # --------------------------------------------------------
+        echo "🔑 Listing certificates in slot $SLOT..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type cert
 
-        # Extract first private key
+        # --------------------------------------------------------
+        # Step 7: Extract the first private key ID and label for signing
+        # --------------------------------------------------------
+        echo "🔑 Extracting first private key ID and label for signing..."
         KEY_INFO=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey | head -n10)
+
         if [ -z "$KEY_INFO" ]; then
           echo "❌ No private key found in slot $SLOT"
           exit 1
@@ -155,7 +184,9 @@ jobs:
         KEY_LABEL=$(echo "$KEY_INFO" | awk '/Label:/ {print $2; exit}')
         echo "✅ Using private key ID: $KEY_ID, Label: $KEY_LABEL"
 
-        # Sign JSON file
+        # --------------------------------------------------------
+        # Step 8: Sign the input file with the extracted private key
+        # --------------------------------------------------------
         echo "✍️ Signing JSON file..."
         docker exec $CONTAINER_NAME pkcs11-tool \
           --module "$MODULE" \
@@ -166,19 +197,19 @@ jobs:
           --output-file "$CONTAINER_SIG" \
           --id "$KEY_ID"
 
-        # Verify signature output
-        docker exec $CONTAINER_NAME test -f "$CONTAINER_SIG" || { echo "❌ Signature file was not created"; exit 1; }
+        # --------------------------------------------------------
+        # Step 9: Verify the signature output
+        # --------------------------------------------------------
+        echo "📦 Verifying signature output..."
+        docker exec $CONTAINER_NAME test -f "$CONTAINER_SIG" || { 
+          echo "❌ Signature file was not created"; 
+          exit 1; 
+        }
 
-        # Copy signature to runner workspace
+        # --------------------------------------------------------
+        # Step 10: Copy signature file to runner workspace
+        # --------------------------------------------------------
+        echo "📥 Copying signature to runner workspace..."
         cp "$FILES_DIR/file.json.sig" .
 
         echo "✅ Signing completed successfully"
-
-    # ============================================================
-    # Upload artifact for download
-    # ============================================================
-    - name: Upload signed file
-      uses: actions/upload-artifact@v4
-      with:
-        name: signed-json
-        path: file.json.sig
