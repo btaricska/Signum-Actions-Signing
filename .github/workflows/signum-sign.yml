@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   sign:
@@ -78,6 +79,7 @@ jobs:
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
           docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
+
           docker run -d \
             --name $CONTAINER_NAME \
             -p 8080:8080 \
@@ -87,42 +89,45 @@ jobs:
             -e SIGNUM_PASSWORD \
             -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
+
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE TEMPORARY JSON FILE TO SIGN
+      # CREATE JSON FILE TO SIGN
       # ============================================================
       - name: Create JSON file to sign
         shell: bash
         run: |
-          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
-          mkdir -p "$TMP_DIR"
-          echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$TMP_DIR/file.json"
+          mkdir -p "$FILES_DIR"
+          cat > "$FILES_DIR/file.json" <<EOF
+          {
+            "message": "Hello from Signum + PKCS11 demo",
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
 
       # ============================================================
-      # SIGN THE JSON FILE VIA PKCS11
+      # SIGN JSON FILE USING PKCS11 INSIDE SIGNUM AGENT
       # ============================================================
       - name: Sign JSON file
         shell: bash
         env:
-          FILES_DIR: tmp-files
-          CONTAINER_NAME: signum-agent
-          PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
+          FILES_DIR: ${{ env.FILES_DIR }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
         run: |
-          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
           docker exec $CONTAINER_NAME pkcs11-tool \
-            --module $PKCS11_LIB \
+            --module /pkcs11/libkeyfactorpkcs11.so \
             --sign \
             --input-file "/mnt/$FILES_DIR/file.json" \
             --output-file "/mnt/$FILES_DIR/file.json.sig" \
             --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
 
       # ============================================================
-      # UPLOAD SIGNED JSON AS ARTIFACT
+      # UPLOAD SIGNED FILE
       # ============================================================
-      - name: Upload Signed JSON
+      - name: Upload signed file
         uses: actions/upload-artifact@v4
         with:
           name: signed-json
-          path: $RUNNER_TEMP/$FILES_DIR/file.json.sig
+          path: ${{ env.FILES_DIR }}/file.json.sig
