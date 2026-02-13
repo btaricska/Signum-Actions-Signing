@@ -1,4 +1,4 @@
-name: Sign Files with Signum Agent
+name: Signum PKCS#11 File Signing
 
 on:
   push:
@@ -39,13 +39,13 @@ jobs:
             -e SIGNUM_CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" \
             -e SIGNUM_USERNAME="${{ secrets.SIGNUM_USERNAME }}" \
             -e SIGNUM_PASSWORD="${{ secrets.SIGNUM_PASSWORD }}" \
-            $SIGNUM_AGENT_IMAGE
+            $SIGNUM_AGENT_IMAGE tail -f /dev/null
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail
 
       - name: Wait for container to initialize
         run: sleep 10
 
-      - name: List PKCS#11 slots in container
+      - name: List PKCS#11 slots
         run: docker exec $CONTAINER_NAME pkcs11-tool --module $PKCS11_LIB --list-slots
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail
 
@@ -56,9 +56,17 @@ jobs:
           --list-objects --type cert
         shell: /usr/bin/bash --noprofile --norc -e -o pipefail
 
+      - name: List private keys
+        run: docker exec $CONTAINER_NAME pkcs11-tool \
+          --module $PKCS11_LIB \
+          --login --pin "${{ secrets.SIGNUM_PKCS11_PIN }}" \
+          --list-objects --type privkey
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail
+
       - name: Sign files
         run: |
           for f in $FILES_DIR/*; do
+            echo "Signing $f..."
             docker exec $CONTAINER_NAME pkcs11-tool \
               --module $PKCS11_LIB \
               --login --pin "${{ secrets.SIGNUM_PKCS11_PIN }}" \
