@@ -139,9 +139,10 @@ jobs:
         fi
         echo "✅ Using slot: $SLOT"
 
-        # List private keys
-        echo "🔑 Listing private keys in slot..."
+        # List private keys and associated certs
+        echo "🔑 Listing all private keys and associated certs in slot..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey
+        docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type cert
 
         # Extract first private key
         KEY_INFO=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey | head -n10)
