@@ -1,4 +1,4 @@
-name: Sign File via Signum Agent + Keyfactor PKCS11
+name: Sign file via Signum + PKCS11
 
 on:
   workflow_dispatch:
@@ -19,27 +19,16 @@ jobs:
       KEYFACTOR_SERVICE_DIR: /usr/local/keyfactor/service
 
     steps:
-      # ============================================================
-      # Checkout repo
-      # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # Install opensc (provides pkcs11-tool)
-      # ============================================================
-
-      - name: Install PKCS11 tooling
+      - name: Install OpenSC (pkcs11-tool)
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y opensc
-          pkcs11-tool --version
-
-      # ============================================================
-      # Validate Signum secrets
-      # ============================================================
+          pkcs11-tool -h
 
       - name: Validate required Signum secrets
         shell: bash
@@ -58,19 +47,11 @@ jobs:
           done
           echo "✅ All required Signum secrets present."
 
-      # ============================================================
-      # Prepare file to sign
-      # ============================================================
-
-      - name: Create file to sign
+      - name: Prepare file to sign
         shell: bash
         run: |
           mkdir -p $FILES_DIR
-          echo "Hello from Signum + Keyfactor PKCS11" > $FILES_DIR/file.txt
-
-      # ============================================================
-      # List PKCS11 slots, certificates, and private keys (host)
-      # ============================================================
+          echo "Hello from Signum + PKCS11" > $FILES_DIR/file.txt
 
       - name: List PKCS11 slots
         shell: bash
@@ -90,10 +71,6 @@ jobs:
           echo "=== Listing PKCS11 private keys ==="
           pkcs11-tool --module $PKCS11_LIB --list-objects --type privkey
 
-      # ============================================================
-      # Run Signum Agent container
-      # ============================================================
-
       - name: Run Signum Agent container
         shell: bash
         env:
@@ -104,7 +81,6 @@ jobs:
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
           docker rm -f signum-agent >/dev/null 2>&1 || true
-
           docker run -d \
             --name signum-agent \
             -v $PWD/$FILES_DIR:/mnt/filestosign \
@@ -113,28 +89,17 @@ jobs:
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
             $SIGNUM_AGENT_IMAGE
-
           sleep 5
-          echo "=== Container logs ==="
           docker logs signum-agent | tail -n 20
 
-      # ============================================================
-      # Sign file via Signum Agent
-      # ============================================================
-
-      - name: Sign file via Signum Agent
+      - name: Sign file using Signum Agent
         shell: bash
         run: |
           docker exec signum-agent bash -c "\
-            # Example: Sign file.txt and output file.txt.sig \
-            # Replace below with actual Signum CLI signing command \
             echo 'Signing /mnt/filestosign/file.txt...' && \
+            # Replace below with Signum CLI signing command \
             touch /mnt/filestosign/file.txt.sig \
           "
-
-      # ============================================================
-      # Upload artifacts
-      # ============================================================
 
       - name: Upload signed file
         if: always()
@@ -145,10 +110,6 @@ jobs:
             $FILES_DIR/file.txt
             $FILES_DIR/file.txt.sig
 
-      # ============================================================
-      # Cleanup container
-      # ============================================================
-
-      - name: Cleanup
+      - name: Cleanup container
         if: always()
         run: docker rm -f signum-agent >/dev/null 2>&1 || true
