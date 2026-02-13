@@ -77,9 +77,7 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
-
           docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
-
           docker run -d \
             --name $CONTAINER_NAME \
             -p 8080:8080 \
@@ -87,14 +85,44 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -v $GITHUB_WORKSPACE/$FILES_DIR:/mnt/$FILES_DIR \
+            -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
-
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE JSON FILE TO SIGN
+      # CREATE TEMPORARY JSON FILE TO SIGN
       # ============================================================
       - name: Create JSON file to sign
-        shell:
+        shell: bash
+        run: |
+          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
+          mkdir -p "$TMP_DIR"
+          echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$TMP_DIR/file.json"
+
+      # ============================================================
+      # SIGN THE JSON FILE VIA PKCS11
+      # ============================================================
+      - name: Sign JSON file
+        shell: bash
+        env:
+          FILES_DIR: tmp-files
+          CONTAINER_NAME: signum-agent
+          PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
+        run: |
+          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
+          docker exec $CONTAINER_NAME pkcs11-tool \
+            --module $PKCS11_LIB \
+            --sign \
+            --input-file "/mnt/$FILES_DIR/file.json" \
+            --output-file "/mnt/$FILES_DIR/file.json.sig" \
+            --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
+
+      # ============================================================
+      # UPLOAD SIGNED JSON AS ARTIFACT
+      # ============================================================
+      - name: Upload Signed JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-json
+          path: $RUNNER_TEMP/$FILES_DIR/file.json.sig
