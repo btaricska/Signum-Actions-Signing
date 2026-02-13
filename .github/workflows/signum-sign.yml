@@ -38,7 +38,7 @@ jobs:
           echo "Support: https://support.keyfactor.com/" >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
-      # PREFLIGHT VALIDATION (ALL FROM SECRETS)
+      # VALIDATE REQUIRED SECRETS
       # ============================================================
 
       - name: Validate required secrets
@@ -48,19 +48,14 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
-
-          echo "Running secret validation..."
           missing=()
 
           check_secret () {
-            local name="$1"
-            local value="$2"
-            if [ -z "${value}" ]; then
-              missing+=("$name")
+            if [ -z "$2" ]; then
+              missing+=("$1")
             fi
           }
 
@@ -68,7 +63,6 @@ jobs:
           check_secret "secrets.SIGNUM_CLIENTID" "${SIGNUM_CLIENTID}"
           check_secret "secrets.SIGNUM_USERNAME" "${SIGNUM_USERNAME}"
           check_secret "secrets.SIGNUM_PASSWORD" "${SIGNUM_PASSWORD}"
-          check_secret "secrets.SIGNUM_PKCS11_MODULE_B64" "${SIGNUM_PKCS11_MODULE_B64}"
           check_secret "secrets.JFROG_DOCKER_AUTH" "${JFROG_DOCKER_AUTH}"
 
           if [ ${#missing[@]} -gt 0 ]; then
@@ -82,7 +76,7 @@ jobs:
           echo "✅ All required secrets are present." >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
-      # DOCKER AUTH (JFROG)
+      # DOCKER AUTH
       # ============================================================
 
       - name: Configure Docker authentication
@@ -91,7 +85,6 @@ jobs:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
-
           mkdir -p "$DOCKER_CONFIG"
 
           cat > "$DOCKER_CONFIG/config.json" <<EOF
@@ -105,7 +98,6 @@ jobs:
           EOF
 
           chmod 600 "$DOCKER_CONFIG/config.json"
-
           mkdir -p "$HOME/.docker"
           cp "$DOCKER_CONFIG/config.json" "$HOME/.docker/config.json"
 
@@ -119,7 +111,6 @@ jobs:
         id: resolve_image
         shell: bash
         run: |
-          set -euo pipefail
           IMAGE="${{ inputs.signum_agent_image }}"
           if [ -z "${IMAGE}" ]; then
             IMAGE="${DEFAULT_SIGNUM_AGENT_IMAGE}"
@@ -128,10 +119,10 @@ jobs:
           echo "Using image: ${IMAGE}"
 
       # ============================================================
-      # RUN SIGNUM AGENT CONTAINER
+      # RUN SIGNUM AGENT
       # ============================================================
 
-      - name: Run Signum Agent and PKCS11 validation
+      - name: Run Signum Agent container
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -139,24 +130,16 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           SIGNUM_AGENT_IMAGE: ${{ steps.resolve_image.outputs.image }}
-          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
-          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
         run: |
           set -euo pipefail
-
-          echo "== System Info ==" | tee basic-checks.txt
-          uname -a | tee -a basic-checks.txt
-          docker --version | tee -a basic-checks.txt
 
           mkdir -p filestosign
           echo 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
 
-          echo "== Pulling Signum Agent ==" | tee docker-pull.txt
-          docker pull "${SIGNUM_AGENT_IMAGE}" 2>&1 | tee -a docker-pull.txt
+          docker pull "${SIGNUM_AGENT_IMAGE}"
 
           docker rm -f signum-agent >/dev/null 2>&1 || true
 
-          echo "== Starting Signum Agent ==" | tee docker-run.txt
           docker run -d \
             --name signum-agent \
             -p 8080:8080 \
@@ -165,25 +148,52 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            "${SIGNUM_AGENT_IMAGE}" | tee -a docker-run.txt
+            "${SIGNUM_AGENT_IMAGE}"
 
           sleep 5
-          docker ps | tee signum-container-status.txt
+          docker ps
 
-          # Prepare PKCS11 module
+      # ============================================================
+      # EXTRACT PKCS11 MODULE FROM CONTAINER
+      # ============================================================
+
+      - name: Extract PKCS11 module from container
+        shell: bash
+        run: |
+          set -euo pipefail
+
           mkdir -p "${PKCS11_WORK_DIR}"
-          printf '%s' "${SIGNUM_PKCS11_MODULE_B64}" | base64 -d > "${PKCS11_WORK_MODULE}"
+
+          echo "Locating signum-pkcs11.so inside container..."
+
+          MODULE_PATH=$(docker exec signum-agent sh -c "find / -name 'signum-pkcs11.so' 2>/dev/null | head -n 1")
+
+          if [ -z "${MODULE_PATH}" ]; then
+            echo "❌ Could not locate signum-pkcs11.so inside container"
+            exit 1
+          fi
+
+          echo "Found at: ${MODULE_PATH}"
+
+          docker cp signum-agent:"${MODULE_PATH}" "${PKCS11_WORK_MODULE}"
+
           chmod 755 "${PKCS11_WORK_MODULE}"
 
-          echo "== PKCS11 Slot Listing ==" | tee pkcs11-slots.txt
+          file "${PKCS11_WORK_MODULE}"
+
+      # ============================================================
+      # PKCS11 SLOT LISTING
+      # ============================================================
+
+      - name: PKCS11 slot listing
+        shell: bash
+        run: |
+          set -euo pipefail
 
           docker run --rm \
             -v "$PWD/${PKCS11_WORK_MODULE}:${PKCS11_MOUNT_PATH}:ro" \
             ghcr.io/open-sc/opensc:latest \
-            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots \
-            2>&1 | tee -a pkcs11-slots.txt || true
-
-          docker logs signum-agent | tail -n 500 > signum-agent.log || true
+            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots
 
       # ============================================================
       # CLEANUP
@@ -192,19 +202,3 @@ jobs:
       - name: Cleanup container
         if: always()
         run: docker rm -f signum-agent >/dev/null 2>&1 || true
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: signum-output
-          if-no-files-found: ignore
-          path: |
-            basic-checks.txt
-            docker-pull.txt
-            docker-run.txt
-            signum-container-status.txt
-            pkcs11-slots.txt
-            signum-agent.log
-            filestosign/example-script.ps1
-            pkcs11-work/**
