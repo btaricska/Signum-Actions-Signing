@@ -19,15 +19,8 @@ jobs:
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
-      # ============================================================
-      # Checkout repository
-      # ============================================================
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # ============================================================
-      # Validate required secrets
-      # ============================================================
       - name: Validate secrets
         shell: bash
         env:
@@ -46,9 +39,6 @@ jobs:
           done
           echo "✅ Secrets validated"
 
-      # ============================================================
-      # Configure Docker authentication
-      # ============================================================
       - name: Configure Docker auth
         shell: bash
         env:
@@ -65,9 +55,6 @@ jobs:
           }
           EOF
 
-      # ============================================================
-      # Start Signum Agent container
-      # ============================================================
       - name: Start Signum Agent
         shell: bash
         env:
@@ -98,16 +85,9 @@ jobs:
             sleep 2
           done
 
-          echo "🔧 Ensuring KeyfactorService is running..."
-          docker exec $CONTAINER_NAME bash -c "systemctl enable --now KeyfactorService || true"
-          docker exec $CONTAINER_NAME systemctl status KeyfactorService
-
           echo "🔍 Listing all Keyfactor slots..."
           docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots
 
-      # ============================================================
-      # Create JSON file
-      # ============================================================
       - name: Create JSON file to sign
         shell: bash
         run: |
@@ -115,9 +95,6 @@ jobs:
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created"
 
-      # ============================================================
-      # Sign JSON file via PKCS11
-      # ============================================================
       - name: Sign JSON file
         shell: bash
         run: |
@@ -128,10 +105,7 @@ jobs:
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
           echo "🔎 Verifying input file exists in container..."
-          docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || {
-            echo "❌ Input file not found"
-            exit 1
-          }
+          docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || { echo "❌ Input file not found"; exit 1; }
           echo "✅ Input file verified"
 
           echo "🔍 Detecting first initialized token slot..."
@@ -144,22 +118,16 @@ jobs:
           fi
           echo "✅ Using slot: $SLOT"
 
-          echo "🔐 Listing all objects in slot $SLOT..."
-          docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects
+          echo "🔑 Listing all private keys in slot..."
+          docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey
 
           echo "🔑 Extracting first private key..."
-          KEY_INFO=$(docker exec $CONTAINER_NAME pkcs11-tool \
-                      --module "$MODULE" \
-                      --slot "$SLOT" \
-                      --login \
-                      --list-objects --type privkey \
-                      | head -n 5)
-          
+          KEY_INFO=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey | head -n5)
           if [ -z "$KEY_INFO" ]; then
             echo "❌ No private key found in slot $SLOT"
             exit 1
           fi
-          
+
           KEY_ID=$(echo "$KEY_INFO" | awk '/ID:/ {print $2; exit}')
           KEY_LABEL=$(echo "$KEY_INFO" | awk '/Label:/ {print $2; exit}')
           echo "✅ Using private key ID: $KEY_ID, Label: $KEY_LABEL"
@@ -175,19 +143,13 @@ jobs:
             --id "$KEY_ID"
 
           echo "📦 Verifying signature..."
-          docker exec $CONTAINER_NAME test -f "$CONTAINER_SIG" || {
-            echo "❌ Signature file was not created"
-            exit 1
-          }
+          docker exec $CONTAINER_NAME test -f "$CONTAINER_SIG" || { echo "❌ Signature file was not created"; exit 1; }
 
           echo "📥 Copying signature to runner workspace..."
           cp "$FILES_DIR/file.json.sig" .
 
           echo "✅ Signing completed successfully"
 
-      # ============================================================
-      # Upload signed file artifact
-      # ============================================================
       - name: Upload signed JSON
         uses: actions/upload-artifact@v4
         with:
