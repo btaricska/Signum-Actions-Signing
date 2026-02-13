@@ -7,6 +7,7 @@ on:
         description: "Container image to use (include tag)"
         required: false
         default: "keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1"
+
   push:
     branches: ["main"]
     paths:
@@ -37,25 +38,25 @@ jobs:
           echo "Support: https://support.keyfactor.com/" >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
-      # PREFLIGHT VALIDATION
+      # PREFLIGHT VALIDATION (ALL FROM SECRETS)
       # ============================================================
 
-      - name: Validate required configuration
+      - name: Validate required secrets
         shell: bash
         env:
-          SIGNUM_HOSTNAME: ${{ vars.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ vars.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ vars.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ vars.SIGNUM_PASSWORD }}
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
 
-          echo "Running configuration validation..."
+          echo "Running secret validation..."
           missing=()
 
-          check_var () {
+          check_secret () {
             local name="$1"
             local value="$2"
             if [ -z "${value}" ]; then
@@ -63,28 +64,25 @@ jobs:
             fi
           }
 
-          # Required repository variables
-          check_var "vars.SIGNUM_HOSTNAME" "${SIGNUM_HOSTNAME}"
-          check_var "vars.SIGNUM_CLIENTID" "${SIGNUM_CLIENTID}"
-          check_var "vars.SIGNUM_USERNAME" "${SIGNUM_USERNAME}"
-          check_var "vars.SIGNUM_PASSWORD" "${SIGNUM_PASSWORD}"
-
-          # Required secrets
-          check_var "secrets.JFROG_DOCKER_AUTH" "${JFROG_DOCKER_AUTH}"
-          check_var "secrets.SIGNUM_PKCS11_MODULE_B64" "${SIGNUM_PKCS11_MODULE_B64}"
+          check_secret "secrets.SIGNUM_HOSTNAME" "${SIGNUM_HOSTNAME}"
+          check_secret "secrets.SIGNUM_CLIENTID" "${SIGNUM_CLIENTID}"
+          check_secret "secrets.SIGNUM_USERNAME" "${SIGNUM_USERNAME}"
+          check_secret "secrets.SIGNUM_PASSWORD" "${SIGNUM_PASSWORD}"
+          check_secret "secrets.SIGNUM_PKCS11_MODULE_B64" "${SIGNUM_PKCS11_MODULE_B64}"
+          check_secret "secrets.JFROG_DOCKER_AUTH" "${JFROG_DOCKER_AUTH}"
 
           if [ ${#missing[@]} -gt 0 ]; then
-            echo "❌ Missing required configuration:" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ Missing required secrets:" >> "$GITHUB_STEP_SUMMARY"
             for item in "${missing[@]}"; do
               echo "- $item" >> "$GITHUB_STEP_SUMMARY"
             done
             exit 1
           fi
 
-          echo "✅ Configuration validation passed." >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ All required secrets are present." >> "$GITHUB_STEP_SUMMARY"
 
       # ============================================================
-      # DOCKER AUTH
+      # DOCKER AUTH (JFROG)
       # ============================================================
 
       - name: Configure Docker authentication
@@ -130,16 +128,16 @@ jobs:
           echo "Using image: ${IMAGE}"
 
       # ============================================================
-      # RUN SIGNUM AGENT
+      # RUN SIGNUM AGENT CONTAINER
       # ============================================================
 
       - name: Run Signum Agent and PKCS11 validation
         shell: bash
         env:
-          SIGNUM_HOSTNAME: ${{ vars.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ vars.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ vars.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ vars.SIGNUM_PASSWORD }}
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           SIGNUM_AGENT_IMAGE: ${{ steps.resolve_image.outputs.image }}
           SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
           SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
@@ -191,7 +189,7 @@ jobs:
       # CLEANUP
       # ============================================================
 
-      - name: Cleanup
+      - name: Cleanup container
         if: always()
         run: docker rm -f signum-agent >/dev/null 2>&1 || true
 
