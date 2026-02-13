@@ -125,26 +125,26 @@ jobs:
         docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
         echo "✅ Input file exists"
 
-        # List all slots for debugging (without filtering for initialized token)
+        # List all slots for debugging
         echo "🔍 Listing all PKCS11 slots..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots
 
-        # Detect first initialized token slot (filtering for initialized tokens)
+        # Try detecting initialized slot by just listing all slots (no filters)
         SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots \
-              | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
+              | awk '/Slot/ {slot=$2} /token label:/ {print slot; exit}')
 
         if [ -z "$SLOT" ]; then
-          echo "❌ No initialized token slot found"
+          echo "❌ No token slot found"
           exit 1
         fi
-        echo "✅ Using initialized slot: $SLOT"
+        echo "✅ Using token slot: $SLOT"
 
         # List private keys (type privkey)
-        echo "🔑 Listing private keys in slot $SLOT..."
+        echo "🔑 Listing private keys in slot..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey
 
-        # Extract first private key information
-        KEY_INFO=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey | head -n 10)
+        # Extract first private key
+        KEY_INFO=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot "$SLOT" --login --list-objects --type privkey | head -n10)
         if [ -z "$KEY_INFO" ]; then
           echo "❌ No private key found in slot $SLOT"
           exit 1
@@ -154,7 +154,7 @@ jobs:
         KEY_LABEL=$(echo "$KEY_INFO" | awk '/Label:/ {print $2; exit}')
         echo "✅ Using private key ID: $KEY_ID, Label: $KEY_LABEL"
 
-        # Sign JSON file using the private key
+        # Sign JSON file
         echo "✍️ Signing JSON file..."
         docker exec $CONTAINER_NAME pkcs11-tool \
           --module "$MODULE" \
