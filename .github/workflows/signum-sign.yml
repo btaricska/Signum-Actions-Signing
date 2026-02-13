@@ -20,13 +20,13 @@ jobs:
 
     steps:
       # ============================================================
-      # CHECKOUT REPO
+      # Checkout repository
       # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
-      # VALIDATE REQUIRED SECRETS
+      # Validate required secrets
       # ============================================================
       - name: Validate Signum & JFrog secrets
         shell: bash
@@ -47,7 +47,7 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
+      # Configure Docker authentication for Signum Agent image
       # ============================================================
       - name: Configure Docker auth
         shell: bash
@@ -66,7 +66,7 @@ jobs:
           EOF
 
       # ============================================================
-      # RUN SIGNUM AGENT
+      # Run Signum Agent
       # ============================================================
       - name: Run Signum Agent
         shell: bash
@@ -77,7 +77,6 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
-
           docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
 
           docker run -d \
@@ -94,7 +93,7 @@ jobs:
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE TEMPORARY JSON FILE TO SIGN
+      # Create JSON file to sign
       # ============================================================
       - name: Create JSON file to sign
         shell: bash
@@ -102,9 +101,11 @@ jobs:
           TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
           mkdir -p "$TMP_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$TMP_DIR/file.json"
+          # Copy to the mounted volume so container can access it
+          cp "$TMP_DIR/file.json" "$PWD/$FILES_DIR/"
 
       # ============================================================
-      # SIGN FILE USING PKCS11 VIA SIGNUM AGENT
+      # Sign JSON file via PKCS11 in Signum Agent
       # ============================================================
       - name: Sign JSON file using PKCS11
         shell: bash
@@ -149,3 +150,15 @@ jobs:
             --id "$KEY_ID"
 
           echo "✅ File signed successfully: $CONTAINER_SIG"
+
+          # Copy signed file to runner temp so it can be uploaded as artifact
+          cp "$FILES_DIR/file.json.sig" "$RUNNER_TEMP/"
+
+      # ============================================================
+      # Upload signed JSON file as artifact
+      # ============================================================
+      - name: Upload signed file
+        uses: actions/upload-artifact@v3
+        with:
+          name: signed-json
+          path: ${{ runner.temp }}/file.json.sig
