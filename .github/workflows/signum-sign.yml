@@ -1,4 +1,4 @@
-name: Sign File via Signum Agent + Existing PKCS11
+name: Sign File via Signum Agent + Keyfactor PKCS11
 
 on:
   workflow_dispatch:
@@ -15,13 +15,16 @@ jobs:
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
+      PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
+      KEYFACTOR_SERVICE_DIR: /usr/local/keyfactor/service
+      FILES_DIR: filestosign
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ============================================================
-      # Validate Signum secrets (no PKCS11 module needed)
+      # Validate Signum secrets
       # ============================================================
 
       - name: Validate Signum secrets
@@ -43,7 +46,7 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # Configure Docker auth for Signum Agent image
+      # Configure Docker auth for Signum Agent
       # ============================================================
 
       - name: Configure Docker auth
@@ -77,12 +80,14 @@ jobs:
           docker pull $SIGNUM_AGENT_IMAGE
           docker rm -f signum-agent >/dev/null 2>&1 || true
 
+          mkdir -p $FILES_DIR
+          echo "Hello from Signum + Keyfactor PKCS11" > $FILES_DIR/file.txt
+
           docker run -d \
             --name signum-agent \
-            -p 8080:8080 \
-            -p 5000:5000 \
-            -p 7000:7000 \
-            -v "$PWD/filestosign:/mnt/filestosign" \
+            -v $PKCS11_LIB:/pkcs11/libkeyfactorpkcs11.so:ro \
+            -v $KEYFACTOR_SERVICE_DIR:/keyfactor-service:ro \
+            -v $PWD/$FILES_DIR:/mnt/filestosign \
             -e SIGNUM_HOSTNAME \
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
@@ -93,41 +98,48 @@ jobs:
           docker logs signum-agent | tail -n 20
 
       # ============================================================
-      # List existing PKCS11 certificates inside container
+      # List PKCS11 slots and objects
       # ============================================================
+
+      - name: List PKCS11 slots
+        shell: bash
+        run: |
+          docker exec signum-agent pkcs11-tool --list-slots
 
       - name: List PKCS11 certificates
         shell: bash
         run: |
           docker exec signum-agent pkcs11-tool \
-            --list-slots \
+            --module /pkcs11/libkeyfactorpkcs11.so \
             --list-objects --type cert
 
-      # ============================================================
-      # Prepare file to sign
-      # ============================================================
-
-      - name: Create file to sign
+      - name: List PKCS11 private keys
+        shell: bash
         run: |
-          mkdir -p filestosign
-          echo "Hello from Signum Agent PKCS11 signing" > filestosign/file.txt
+          docker exec signum-agent pkcs11-tool \
+            --module /pkcs11/libkeyfactorpkcs11.so \
+            --list-objects --type privkey
 
       # ============================================================
-      # Sign file using Signum Agent container
+      # Sign file using Signum Agent
       # ============================================================
 
       - name: Sign file
         shell: bash
         run: |
           docker exec signum-agent bash -c "\
-            # Replace this with the actual Signum CLI command to sign /mnt/filestosign/file.txt \
-            echo 'Signing /mnt/filestosign/file.txt using existing PKCS11 keys...' \
+            # Replace below with actual Signum signing command \
+            echo 'Signing /mnt/filestosign/file.txt using Keyfactor PKCS11 keys...' \
           "
 
       # ============================================================
-      # Cleanup container
+      # Upload artifacts
       # ============================================================
 
-      - name: Cleanup Signum Agent
+      - name: Upload artifacts
         if: always()
-        run: docker rm -f signum-agent >/dev/null 2>&1 || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: signum-output
+          path: |
+            $FILES_DIR/file.txt
