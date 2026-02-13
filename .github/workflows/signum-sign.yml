@@ -1,4 +1,4 @@
-name: Sign File via Signum Agent + Container PKCS11
+name: Sign File via Signum Agent + Host PKCS11
 
 on:
   workflow_dispatch:
@@ -17,11 +17,11 @@ jobs:
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       # ============================================================
-      # VALIDATE SIGNUM SECRETS
+      # Validate required secrets
       # ============================================================
 
       - name: Validate Signum secrets
@@ -43,7 +43,42 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # CONFIGURE DOCKER AUTH
+      # Install SoftHSM2 + OpenSC on runner
+      # ============================================================
+
+      - name: Install SoftHSM2 + OpenSC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2 opensc
+
+      # ============================================================
+      # Configure SoftHSM2 token on runner
+      # ============================================================
+
+      - name: Setup SoftHSM2 token
+        run: |
+          mkdir -p softhsm2-tokens
+          cat > softhsm2.conf <<EOF
+          directories.tokendir = $PWD/softhsm2-tokens
+          objectstore.backend = file
+          log.level = INFO
+          EOF
+          export SOFTHSM2_CONF=$PWD/softhsm2.conf
+          softhsm2-util --init-token --free --label GitHubToken --so-pin 1234 --pin 1234
+
+      - name: Generate PKCS11 RSA keypair
+        run: |
+          pkcs11-tool \
+            --module /usr/lib/softhsm/libsofthsm2.so \
+            --login \
+            --pin 1234 \
+            --keypairgen \
+            --key-type rsa:2048 \
+            --id 01 \
+            --label github-key
+
+      # ============================================================
+      # Configure Docker auth for Signum Agent image
       # ============================================================
 
       - name: Configure Docker auth
@@ -63,7 +98,7 @@ jobs:
           EOF
 
       # ============================================================
-      # RUN SIGNUM AGENT CONTAINER
+      # Run Signum Agent container
       # ============================================================
 
       - name: Run Signum Agent container
@@ -75,7 +110,7 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
-          docker rm -f signum-agent >/dev/null 2>&1 || true
+          docker rm -f signum-agent || true
 
           docker run -d \
             --name signum-agent \
@@ -84,79 +119,51 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
+            -v /usr/lib/softhsm/libsofthsm2.so:/pkcs11/libsofthsm2.so:ro \
+            -v $PWD/softhsm2-tokens:/var/lib/softhsm/tokens \
             $SIGNUM_AGENT_IMAGE
 
-          sleep 10
-          docker logs signum-agent | tail -n 50
+          sleep 5
+          docker logs signum-agent | tail -n 20
 
       # ============================================================
-      # INSTALL SOFTHSM2 + OPENSC INSIDE CONTAINER
+      # List certificates inside container via PKCS11
       # ============================================================
 
-      - name: Install SoftHSM2 + OpenSC in container
-        shell: bash
-        run: |
-          docker exec signum-agent bash -c "\
-            apt-get update && \
-            DEBIAN_FRONTEND=noninteractive apt-get install -y softhsm2 opensc \
-          "
-
-      # ============================================================
-      # CONFIGURE SOFTHSM2 TOKEN INSIDE CONTAINER
-      # ============================================================
-
-      - name: Initialize SoftHSM2 token inside container
-        shell: bash
-        run: |
-          docker exec signum-agent bash -c "\
-            mkdir -p /var/lib/softhsm/tokens && \
-            softhsm2-util --init-token --free --label GitHubToken --so-pin 1234 --pin 1234 \
-          "
-
-      - name: Generate RSA keypair inside container
-        shell: bash
-        run: |
-          docker exec signum-agent bash -c "\
-            pkcs11-tool \
-              --module /usr/lib/softhsm/libsofthsm2.so \
-              --login \
-              --pin 1234 \
-              --keypairgen \
-              --key-type rsa:2048 \
-              --id 01 \
-              --label github-key \
-          "
-
-      # ============================================================
-      # LIST CERTIFICATES INSIDE CONTAINER
-      # ============================================================
-
-      - name: List certificates inside container
+      - name: List certificates via PKCS11 inside container
         shell: bash
         run: |
           docker exec signum-agent pkcs11-tool \
-            --module /usr/lib/softhsm/libsofthsm2.so \
+            --module /pkcs11/libsofthsm2.so \
             --login \
             --pin 1234 \
             --list-objects --type cert
 
       # ============================================================
-      # CREATE FILE TO SIGN
+      # Prepare file to sign
       # ============================================================
 
       - name: Create file to sign
         run: |
           mkdir -p filestosign
-          echo "Hello from Signum + native PKCS11 inside container" > filestosign/file.txt
+          echo "Hello from Signum + host PKCS11" > filestosign/file.txt
 
       # ============================================================
-      # SIGN FILE VIA SIGNUM AGENT
+      # Sign file (placeholder for Signum Agent signing command)
       # ============================================================
 
       - name: Sign file via Signum Agent
         shell: bash
         run: |
           docker exec signum-agent bash -c "\
-            # Replace this with your actual agent CLI/API signing command \
-            echo 'Simulated signing of /mnt/filestosign/file.txt using PKCS11 token' \
+            # Replace this with your actual Signum signing CLI/API command \
+            echo 'Signing filestosign/file.txt with PKCS11 token...' \
           "
+
+      # ============================================================
+      # Cleanup
+      # ============================================================
+
+      - name: Cleanup Signum Agent
+        if: always()
+        run: docker rm -f signum-agent >/dev/null 2>&1 || true
