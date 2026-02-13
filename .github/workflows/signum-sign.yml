@@ -15,8 +15,8 @@ jobs:
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       CONTAINER_NAME: signum-agent
-      DOCKER_CONFIG: ${{ github.workspace }}/.docker
       PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
       # ============================================================
@@ -89,19 +89,19 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -v $GITHUB_WORKSPACE/tmp-files:/mnt/tmp-files \
+            -v $RUNNER_TEMP:/mnt/tmp-files \
             $SIGNUM_AGENT_IMAGE
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE FILE TO SIGN (WRITABLE DIRECTORY)
+      # CREATE FILE TO SIGN (FULL ACCESS)
       # ============================================================
 
       - name: Create file to sign
         shell: bash
         run: |
-          TMP_DIR="$GITHUB_WORKSPACE/tmp-files"
+          TMP_DIR="$RUNNER_TEMP"
           mkdir -p "$TMP_DIR"
           echo "Hello from Signum + PKCS11 demo" > "$TMP_DIR/file.txt"
 
@@ -112,7 +112,7 @@ jobs:
       - name: Sign files with Signum Agent
         shell: bash
         run: |
-          TMP_DIR="$GITHUB_WORKSPACE/tmp-files"
+          TMP_DIR="$RUNNER_TEMP"
           docker exec $CONTAINER_NAME pkcs11-tool \
             --module $PKCS11_LIB \
             --sign \
@@ -128,4 +128,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: "$GITHUB_WORKSPACE/tmp-files/*.sig"
+          path: "$RUNNER_TEMP/file.txt.sig"
