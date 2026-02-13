@@ -98,7 +98,7 @@ jobs:
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE TEMPORARY JSON FILE TO SIGN
+      # CREATE JSON FILE TO SIGN
       # ============================================================
 
       - name: Create JSON file to sign
@@ -109,30 +109,31 @@ jobs:
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$TMP_DIR/file.json"
 
       # ============================================================
-      # SIGN JSON FILE USING PKCS11 VIA SIGNUM AGENT
+      # SIGN JSON FILE USING FIRST AVAILABLE PKCS11 KEY
       # ============================================================
 
-      - name: Sign JSON file using any available slot
+      - name: Sign JSON file using PKCS11 via Signum Agent
         shell: bash
         env:
-          TMP_DIR: ${{ runner.temp }}/$FILES_DIR
-          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          FILES_DIR: filestosign
+          CONTAINER_NAME: signum-agent
         run: |
-          # Find the first slot with a present token
-          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots | grep "Slot" | head -n1 | awk '{print $2}')
+          set -euo pipefail
+
+          CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
+          CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
+
+          # Find first slot with a present token
+          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots \
+                 | grep "Slot" | head -n1 | awk '{print $2}')
           if [ -z "$SLOT" ]; then
             echo "❌ No slot with a present token found"
             exit 1
           fi
 
-          # List private keys in that slot
-          docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot $SLOT --list-objects --type privkey
-
-          # List certificates in that slot
-          docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot $SLOT --list-objects --type cert
-
-          # Use the first private key ID for signing
-          KEY_ID=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot $SLOT --list-objects --type privkey | grep "ID:" | head -n1 | awk '{print $2}')
+          # Find first private key ID in that slot
+          KEY_ID=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so \
+                   --slot $SLOT --list-objects --type privkey | grep "ID:" | head -n1 | awk '{print $2}')
           if [ -z "$KEY_ID" ]; then
             echo "❌ No private key found in slot $SLOT"
             exit 1
@@ -144,18 +145,8 @@ jobs:
             --slot $SLOT \
             --login \
             --sign \
-            --input-file "/mnt/$FILES_DIR/file.json" \
-            --output-file "/mnt/$FILES_DIR/file.json.sig" \
+            --input-file "$CONTAINER_FILE" \
+            --output-file "$CONTAINER_SIG" \
             --id "$KEY_ID"
 
-          echo "✅ File signed successfully. Output: file.json.sig"
-
-      # ============================================================
-      # UPLOAD SIGNED FILE AS ARTIFACT
-      # ============================================================
-
-      - name: Upload signed JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-json
-          path: ${{ runner.temp }}/$FILES_DIR/file.json.sig
+          echo "✅ File signed successfully: $CONTAINER_SIG"
