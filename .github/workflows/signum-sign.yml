@@ -15,16 +15,19 @@ jobs:
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
+      FILES_DIR: filestosign
+      PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
+      CONTAINER_NAME: signum-agent
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
-      # VALIDATE SIGNUM SECRETS
+      # VALIDATE SECRETS
       # ============================================================
 
-      - name: Validate Signum secrets
+      - name: Validate Signum and JFrog secrets
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -43,46 +46,6 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # INSTALL NATIVE PKCS11 (SoftHSM2)
-      # ============================================================
-
-      - name: Install SoftHSM2
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y softhsm2 opensc
-
-      - name: Configure SoftHSM
-        run: |
-          mkdir -p softhsm2-tokens
-
-          cat > softhsm2.conf <<EOF
-          directories.tokendir = $PWD/softhsm2-tokens
-          objectstore.backend = file
-          log.level = INFO
-          EOF
-
-          echo "SOFTHSM2_CONF=$PWD/softhsm2.conf" >> $GITHUB_ENV
-
-      - name: Initialize PKCS11 token
-        run: |
-          softhsm2-util --init-token \
-            --free \
-            --label "GitHubToken" \
-            --so-pin 1234 \
-            --pin 1234
-
-      - name: Generate PKCS11 keypair
-        run: |
-          pkcs11-tool \
-            --module /usr/lib/softhsm/libsofthsm2.so \
-            --login \
-            --pin 1234 \
-            --keypairgen \
-            --key-type rsa:2048 \
-            --id 01 \
-            --label github-key
-
-      # ============================================================
       # DOCKER AUTH FOR SIGNUM REPO
       # ============================================================
 
@@ -92,7 +55,6 @@ jobs:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
-
           cat > "$DOCKER_CONFIG/config.json" <<EOF
           {
             "auths": {
@@ -104,7 +66,7 @@ jobs:
           EOF
 
       # ============================================================
-      # RUN SIGNUM AGENT WITH NATIVE PKCS11
+      # RUN SIGNUM AGENT
       # ============================================================
 
       - name: Run Signum Agent
@@ -117,31 +79,31 @@ jobs:
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
 
-          docker rm -f signum-agent >/dev/null 2>&1 || true
+          docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
 
           docker run -d \
-            --name signum-agent \
+            --name $CONTAINER_NAME \
             -p 8080:8080 \
             -e SIGNUM_HOSTNAME \
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -e PKCS11_MODULE_PATH=/pkcs11/libsofthsm2.so \
-            -v /usr/lib/softhsm/libsofthsm2.so:/pkcs11/libsofthsm2.so:ro \
-            -v $PWD/softhsm2-tokens:/var/lib/softhsm/tokens \
+            -e PKCS11_MODULE_PATH=$PKCS11_LIB \
+            -v $PKCS11_LIB:$PKCS11_LIB:ro \
+            -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
 
           sleep 5
-          docker logs signum-agent | tail -n 50
+          docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE FILE TO SIGN
+      # CREATE FILES TO SIGN
       # ============================================================
 
       - name: Create file to sign
         run: |
-          mkdir -p filestosign
-          echo "Hello from Signum + native PKCS11 demo" > filestosign/file.txt
+          mkdir -p $FILES_DIR
+          echo "Hello from Signum + native PKCS11 demo" > $FILES_DIR/file.txt
 
       # ============================================================
       # SIGN FILES USING SIGNUM AGENT + PKCS11
@@ -149,10 +111,6 @@ jobs:
 
       - name: Sign files
         shell: bash
-        env:
-          FILES_DIR: filestosign
-          PKCS11_LIB: /pkcs11/libsofthsm2.so
-          CONTAINER_NAME: signum-agent
         run: |
           for f in $FILES_DIR/*; do
             docker exec $CONTAINER_NAME pkcs11-tool \
@@ -160,11 +118,15 @@ jobs:
               --sign \
               --input-file "/mnt/$FILES_DIR/$(basename $f)" \
               --output-file "/mnt/$FILES_DIR/$(basename $f).sig" \
-              --id 01
+              --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
           done
+
+      # ============================================================
+      # UPLOAD SIGNED FILES
+      # ============================================================
 
       - name: Upload signed files
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: filestosign/*.sig
+          path: $FILES_DIR/*.sig
