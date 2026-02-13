@@ -58,13 +58,11 @@ jobs:
       - name: Configure SoftHSM token directory
         run: |
           mkdir -p softhsm2-tokens
-
           cat > softhsm2.conf <<EOF
           directories.tokendir = $PWD/softhsm2-tokens
           objectstore.backend = file
           log.level = INFO
           EOF
-
           echo "SOFTHSM2_CONF=$PWD/softhsm2.conf" >> $GITHUB_ENV
 
       # ============================================================
@@ -100,7 +98,6 @@ jobs:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
-
           cat > "$DOCKER_CONFIG/config.json" <<EOF
           {
             "auths": {
@@ -112,7 +109,7 @@ jobs:
           EOF
 
       # ============================================================
-      # RUN SIGNUM AGENT
+      # RUN SIGNUM AGENT (FIXED DOCKER RUN)
       # ============================================================
 
       - name: Run Signum Agent container
@@ -129,4 +126,49 @@ jobs:
 
           docker run -d \
             --name signum-agent \
-            -p 8
+            -p 8080:8080 \
+            -e SIGNUM_HOSTNAME \
+            -e SIGNUM_CLIENTID \
+            -e SIGNUM_USERNAME \
+            -e SIGNUM_PASSWORD \
+            -e PKCS11_MODULE_PATH=/pkcs11/libsofthsm2.so \
+            -v /usr/lib/softhsm/libsofthsm2.so:/pkcs11/libsofthsm2.so:ro \
+            -v $PWD/softhsm2-tokens:/var/lib/softhsm/tokens \
+            $SIGNUM_AGENT_IMAGE
+
+          sleep 5
+          docker logs signum-agent | tail -n 50
+
+      # ============================================================
+      # CREATE FILE TO SIGN
+      # ============================================================
+
+      - name: Create file to sign
+        run: |
+          mkdir -p filestosign
+          echo "Hello from Signum + native PKCS11 demo" > filestosign/file.txt
+
+      # ============================================================
+      # LIST CERTIFICATES VIA PKCS11 INSIDE CONTAINER
+      # ============================================================
+
+      - name: List certificates via PKCS11
+        shell: bash
+        run: |
+          docker run --rm \
+            -v /usr/lib/softhsm/libsofthsm2.so:/pkcs11/libsofthsm2.so:ro \
+            -v $PWD/softhsm2-tokens:/var/lib/softhsm/tokens \
+            ghcr.io/open-sc/opensc:latest \
+            pkcs11-tool \
+              --module /pkcs11/libsofthsm2.so \
+              --login \
+              --pin 1234 \
+              --list-objects --type cert
+
+      # ============================================================
+      # CLEANUP
+      # ============================================================
+
+      - name: Cleanup Signum Agent
+        if: always()
+        run: docker rm -f signum-agent >/dev/null 2>&1 || true
