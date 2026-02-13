@@ -43,13 +43,17 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # INSTALL SOFTHSM2 (NATIVE PKCS#11)
+      # INSTALL SOFTHSM2 + OpenSC (provides pkcs11-tool)
       # ============================================================
 
-      - name: Install SoftHSM2
+      - name: Install SoftHSM2 + OpenSC
         run: |
           sudo apt-get update
-          sudo apt-get install -y softhsm2
+          sudo apt-get install -y softhsm2 opensc
+
+      # ============================================================
+      # CONFIGURE SOFTHSM TOKEN
+      # ============================================================
 
       - name: Configure SoftHSM token directory
         run: |
@@ -131,7 +135,7 @@ jobs:
           docker logs signum-agent | tail -n 50
 
       # ============================================================
-      # LIST CERTIFICATES VIA SIGNUM AGENT
+      # LIST CERTIFICATES VIA PKCS11 INSIDE AGENT
       # ============================================================
 
       - name: List certificates inside Signum Agent container
