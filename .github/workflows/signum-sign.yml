@@ -1,4 +1,4 @@
-name: Sign File via Signum Agent + Native PKCS11
+name: Sign File via Signum Agent + PKCS11
 
 on:
   workflow_dispatch:
@@ -14,20 +14,23 @@ jobs:
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      DOCKER_CONFIG: ${{ github.workspace }}/.docker
       FILES_DIR: filestosign
-      PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
       CONTAINER_NAME: signum-agent
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
+      # ============================================================
+      # CHECKOUT REPO
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
-      # VALIDATE SECRETS
+      # VALIDATE REQUIRED SECRETS
       # ============================================================
 
-      - name: Validate Signum and JFrog secrets
+      - name: Validate Signum & JFrog secrets
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -46,7 +49,7 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # DOCKER AUTH FOR SIGNUM REPO
+      # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
       # ============================================================
 
       - name: Configure Docker auth
@@ -88,8 +91,6 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -e PKCS11_MODULE_PATH=$PKCS11_LIB \
-            -v $PKCS11_LIB:$PKCS11_LIB:ro \
             -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
 
@@ -103,23 +104,23 @@ jobs:
       - name: Create file to sign
         run: |
           mkdir -p $FILES_DIR
-          echo "Hello from Signum + native PKCS11 demo" > $FILES_DIR/file.txt
+          echo "Hello from Signum + PKCS11 demo" > $FILES_DIR/file.txt
 
       # ============================================================
-      # SIGN FILES USING SIGNUM AGENT + PKCS11
+      # SIGN FILES USING CONTAINER PKCS11
       # ============================================================
 
       - name: Sign files
         shell: bash
         run: |
+          CONTAINER_PKCS11_LIB=/pkcs11/libkeyfactorpkcs11.so
           for f in $FILES_DIR/*; do
             docker exec $CONTAINER_NAME pkcs11-tool \
-              --module $PKCS11_LIB \
+              --module $CONTAINER_PKCS11_LIB \
               --sign \
               --input-file "/mnt/$FILES_DIR/$(basename $f)" \
               --output-file "/mnt/$FILES_DIR/$(basename $f).sig" \
               --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
-          done
 
       # ============================================================
       # UPLOAD SIGNED FILES
