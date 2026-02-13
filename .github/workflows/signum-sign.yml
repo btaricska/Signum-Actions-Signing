@@ -15,14 +15,13 @@ jobs:
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
-      PKCS11_MODULE_PATH: /pkcs11/signum-pkcs11.so
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ============================================================
-      # Validate Signum secrets
+      # Validate Signum secrets (no PKCS11 module needed)
       # ============================================================
 
       - name: Validate Signum secrets
@@ -33,10 +32,9 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD SIGNUM_PKCS11_MODULE_B64 JFROG_DOCKER_AUTH; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -75,22 +73,15 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
           docker rm -f signum-agent >/dev/null 2>&1 || true
-
-          # Write the PKCS11 module to disk so container can mount it
-          mkdir -p pkcs11-work
-          printf '%s' "${SIGNUM_PKCS11_MODULE_B64}" | base64 -d > pkcs11-work/signum-pkcs11.so
-          chmod 755 pkcs11-work/signum-pkcs11.so
 
           docker run -d \
             --name signum-agent \
             -p 8080:8080 \
             -p 5000:5000 \
             -p 7000:7000 \
-            -v "$PWD/pkcs11-work/signum-pkcs11.so:${PKCS11_MODULE_PATH}:ro" \
             -v "$PWD/filestosign:/mnt/filestosign" \
             -e SIGNUM_HOSTNAME \
             -e SIGNUM_CLIENTID \
@@ -109,7 +100,6 @@ jobs:
         shell: bash
         run: |
           docker exec signum-agent pkcs11-tool \
-            --module ${PKCS11_MODULE_PATH} \
             --list-slots \
             --list-objects --type cert
 
@@ -120,7 +110,7 @@ jobs:
       - name: Create file to sign
         run: |
           mkdir -p filestosign
-          echo "Hello from Signum + existing PKCS11" > filestosign/file.txt
+          echo "Hello from Signum Agent PKCS11 signing" > filestosign/file.txt
 
       # ============================================================
       # Sign file using Signum Agent container
@@ -130,7 +120,7 @@ jobs:
         shell: bash
         run: |
           docker exec signum-agent bash -c "\
-            # Replace with actual Signum CLI/API call to sign /mnt/filestosign/file.txt \
+            # Replace this with the actual Signum CLI command to sign /mnt/filestosign/file.txt \
             echo 'Signing /mnt/filestosign/file.txt using existing PKCS11 keys...' \
           "
 
