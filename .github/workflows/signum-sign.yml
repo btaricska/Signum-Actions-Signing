@@ -97,10 +97,16 @@ jobs:
             fi
             sleep 2
           done
-          docker logs $CONTAINER_NAME | tail -n 20
+
+          echo "🔧 Ensuring KeyfactorService is running..."
+          docker exec $CONTAINER_NAME bash -c "systemctl enable --now KeyfactorService || true"
+          docker exec $CONTAINER_NAME systemctl status KeyfactorService
+
+          echo "🔍 Listing all Keyfactor slots..."
+          docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots
 
       # ============================================================
-      # Create JSON file to sign
+      # Create JSON file
       # ============================================================
       - name: Create JSON file to sign
         shell: bash
@@ -123,7 +129,7 @@ jobs:
 
           echo "🔎 Verifying input file exists in container..."
           docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || {
-            echo "❌ Input file not found inside container"
+            echo "❌ Input file not found"
             exit 1
           }
           echo "✅ Input file verified"
@@ -170,7 +176,7 @@ jobs:
 
           echo "📦 Verifying signature..."
           docker exec $CONTAINER_NAME test -f "$CONTAINER_SIG" || {
-            echo "❌ Signature file not created"
+            echo "❌ Signature file was not created"
             exit 1
           }
 
