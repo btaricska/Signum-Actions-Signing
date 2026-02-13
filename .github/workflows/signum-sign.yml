@@ -43,15 +43,19 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # INSTALL NATIVE PKCS11 (SoftHSM2)
+      # INSTALL NATIVE PKCS11 (SoftHSM2 + OpenSC)
       # ============================================================
 
-      - name: Install SoftHSM2
+      - name: Install SoftHSM2 and OpenSC
         run: |
           sudo apt-get update
           sudo apt-get install -y softhsm2 opensc
 
-      - name: Configure SoftHSM
+      # ============================================================
+      # CONFIGURE SOFTHSM
+      # ============================================================
+
+      - name: Configure SoftHSM token directory
         run: |
           mkdir -p softhsm2-tokens
 
@@ -63,7 +67,11 @@ jobs:
 
           echo "SOFTHSM2_CONF=$PWD/softhsm2.conf" >> $GITHUB_ENV
 
-      - name: Initialize PKCS11 token
+      # ============================================================
+      # INITIALIZE PKCS11 TOKEN
+      # ============================================================
+
+      - name: Initialize SoftHSM token
         run: |
           softhsm2-util --init-token \
             --free \
@@ -83,7 +91,7 @@ jobs:
             --label github-key
 
       # ============================================================
-      # DOCKER AUTH FOR SIGNUM REPO
+      # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
       # ============================================================
 
       - name: Configure Docker auth
@@ -104,10 +112,10 @@ jobs:
           EOF
 
       # ============================================================
-      # RUN SIGNUM AGENT WITH NATIVE PKCS11
+      # RUN SIGNUM AGENT
       # ============================================================
 
-      - name: Run Signum Agent
+      - name: Run Signum Agent container
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -121,33 +129,4 @@ jobs:
 
           docker run -d \
             --name signum-agent \
-            -p 8080:8080 \
-            -e SIGNUM_HOSTNAME \
-            -e SIGNUM_CLIENTID \
-            -e SIGNUM_USERNAME \
-            -e SIGNUM_PASSWORD \
-            -e PKCS11_MODULE_PATH=/pkcs11/libsofthsm2.so \
-            -v /usr/lib/softhsm/libsofthsm2.so:/pkcs11/libsofthsm2.so:ro \
-            -v $PWD/softhsm2-tokens:/var/lib/softhsm/tokens \
-            $SIGNUM_AGENT_IMAGE
-
-          sleep 5
-          docker logs signum-agent | tail -n 50
-
-      # ============================================================
-      # CREATE FILE TO SIGN
-      # ============================================================
-
-      - name: Create file to sign
-        run: |
-          mkdir -p filestosign
-          echo "Hello from Signum + native PKCS11 demo" > filestosign/file.txt
-
-      # ============================================================
-      # (Placeholder) CALL SIGNUM AGENT TO SIGN
-      # ============================================================
-
-      - name: Placeholder - trigger signing
-        run: |
-          echo "At this point you would call the Signum Agent API"
-          echo "It will use the mounted native PKCS11 module"
+            -p 8
