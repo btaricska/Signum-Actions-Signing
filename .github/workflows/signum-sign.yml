@@ -1,4 +1,4 @@
-name: Sign File via Signum Agent + Native PKCS11
+name: Sign File via Signum Agent + PKCS11
 
 on:
   workflow_dispatch:
@@ -14,20 +14,23 @@ jobs:
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      DOCKER_CONFIG: ${{ github.workspace }}/.docker
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
-      PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
+      # ============================================================
+      # CHECKOUT REPO
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
-      # VALIDATE SIGNUM SECRETS
+      # VALIDATE REQUIRED SECRETS
       # ============================================================
 
-      - name: Validate Signum secrets
+      - name: Validate Signum & JFrog secrets
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -46,7 +49,7 @@ jobs:
           echo "✅ All required secrets present."
 
       # ============================================================
-      # CONFIGURE DOCKER AUTH
+      # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
       # ============================================================
 
       - name: Configure Docker auth
@@ -55,7 +58,15 @@ jobs:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
-          echo "$JFROG_DOCKER_AUTH" | docker login keyfactor.jfrog.io --username _json_key --password-stdin
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          {
+            "auths": {
+              "keyfactor.jfrog.io": {
+                "auth": "${JFROG_DOCKER_AUTH}"
+              }
+            }
+          }
+          EOF
 
       # ============================================================
       # RUN SIGNUM AGENT
@@ -79,7 +90,7 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -e PKCS11_MODULE_PATH=$PKCS11_LIB \
+            -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
 
           sleep 5
@@ -90,25 +101,22 @@ jobs:
       # ============================================================
 
       - name: Create file to sign
-        shell: /usr/bin/bash -e {0}
+        shell: bash
         run: |
-          # Ensure the directory exists and is writable
           mkdir -p "$FILES_DIR"
           chmod u+rwx "$FILES_DIR"
-
-          # Create the file
           echo "Hello from Signum + PKCS11 demo" > "$FILES_DIR/file.txt"
 
       # ============================================================
-      # SIGN FILE USING PKCS11 VIA SIGNUM AGENT
+      # SIGN FILES USING SIGNUM AGENT'S BUILT-IN PKCS11
       # ============================================================
 
-      - name: Sign files via Signum Agent + PKCS11
-        shell: /usr/bin/bash -e {0}
+      - name: Sign files via Signum Agent
+        shell: bash
         run: |
           for f in $FILES_DIR/*; do
             docker exec $CONTAINER_NAME pkcs11-tool \
-              --module $PKCS11_LIB \
+              --module /pkcs11/libkeyfactorpkcs11.so \
               --sign \
               --input-file "/mnt/$FILES_DIR/$(basename $f)" \
               --output-file "/mnt/$FILES_DIR/$(basename $f).sig" \
