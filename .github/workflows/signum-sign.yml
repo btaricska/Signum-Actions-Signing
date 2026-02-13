@@ -14,7 +14,7 @@ jobs:
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      FILES_DIR: tmp-files
+      FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
@@ -22,12 +22,14 @@ jobs:
       # ============================================================
       # CHECKOUT REPO
       # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
       # VALIDATE REQUIRED SECRETS
       # ============================================================
+
       - name: Validate Signum & JFrog secrets
         shell: bash
         env:
@@ -49,6 +51,7 @@ jobs:
       # ============================================================
       # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
       # ============================================================
+
       - name: Configure Docker auth
         shell: bash
         env:
@@ -68,6 +71,7 @@ jobs:
       # ============================================================
       # RUN SIGNUM AGENT
       # ============================================================
+
       - name: Run Signum Agent
         shell: bash
         env:
@@ -77,7 +81,9 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
+
           docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
+
           docker run -d \
             --name $CONTAINER_NAME \
             -p 8080:8080 \
@@ -87,12 +93,14 @@ jobs:
             -e SIGNUM_PASSWORD \
             -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
+
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
       # CREATE TEMPORARY JSON FILE TO SIGN
       # ============================================================
+
       - name: Create JSON file to sign
         shell: bash
         run: |
@@ -103,6 +111,7 @@ jobs:
       # ============================================================
       # SIGN JSON FILE USING PKCS11 VIA SIGNUM AGENT
       # ============================================================
+
       - name: Sign JSON file
         shell: bash
         env:
@@ -115,12 +124,3 @@ jobs:
             --input-file "/mnt/$FILES_DIR/file.json" \
             --output-file "/mnt/$FILES_DIR/file.json.sig" \
             --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
-
-      # ============================================================
-      # UPLOAD SIGNED JSON FILE
-      # ============================================================
-      - name: Upload signed file
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-json
-          path: ${{ runner.temp }}/$FILES_DIR/file.json.sig
