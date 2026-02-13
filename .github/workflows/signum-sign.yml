@@ -174,7 +174,16 @@ jobs:
         echo "✅ Signing completed successfully"
 
     # ============================================================
-    # Upload artifact for download
+    # List associated keys and certs in Slot 0
+    # ============================================================
+    - name: List associated keys and certificates in Slot 0
+      shell: bash
+      run: |
+        echo "🔍 Listing all objects in Slot 0 (keys and certificates)..."
+        docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot 0 --list-objects
+
+    # ============================================================
+    # Upload signed file
     # ============================================================
     - name: Upload signed file
       uses: actions/upload-artifact@v4
