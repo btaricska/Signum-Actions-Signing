@@ -1,18 +1,9 @@
-name: Sign document with Signum Container Agent (basic)
+name: Sign File via Signum Agent + Native PKCS11
 
 on:
   workflow_dispatch:
-    inputs:
-      signum_agent_image:
-        description: "Container image to use (include tag)"
-        required: false
-        default: "keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1"
-
   push:
     branches: ["main"]
-    paths:
-      - "filestosign/**"
-      - ".github/workflows/**"
 
 permissions:
   contents: read
@@ -22,26 +13,18 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      DEFAULT_SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      PKCS11_WORK_DIR: pkcs11-work
-      PKCS11_WORK_MODULE: pkcs11-work/signum-pkcs11.so
-      PKCS11_MOUNT_PATH: /pkcs11/signum-pkcs11.so
+      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Support Notice
-        run: |
-          echo "## Signum Container Agent Usage" >> "$GITHUB_STEP_SUMMARY"
-          echo "Support: https://support.keyfactor.com/" >> "$GITHUB_STEP_SUMMARY"
-
       # ============================================================
-      # VALIDATE REQUIRED SECRETS
+      # VALIDATE SIGNUM SECRETS
       # ============================================================
 
-      - name: Validate required secrets
+      - name: Validate Signum secrets
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -51,40 +34,63 @@ jobs:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
-          missing=()
-
-          check_secret () {
-            if [ -z "$2" ]; then
-              missing+=("$1")
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
+            if [ -z "${!s:-}" ]; then
+              echo "❌ Missing secret: $s"
+              exit 1
             fi
-          }
-
-          check_secret "secrets.SIGNUM_HOSTNAME" "${SIGNUM_HOSTNAME}"
-          check_secret "secrets.SIGNUM_CLIENTID" "${SIGNUM_CLIENTID}"
-          check_secret "secrets.SIGNUM_USERNAME" "${SIGNUM_USERNAME}"
-          check_secret "secrets.SIGNUM_PASSWORD" "${SIGNUM_PASSWORD}"
-          check_secret "secrets.JFROG_DOCKER_AUTH" "${JFROG_DOCKER_AUTH}"
-
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "❌ Missing required secrets:" >> "$GITHUB_STEP_SUMMARY"
-            for item in "${missing[@]}"; do
-              echo "- $item" >> "$GITHUB_STEP_SUMMARY"
-            done
-            exit 1
-          fi
-
-          echo "✅ All required secrets are present." >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "✅ All required secrets present."
 
       # ============================================================
-      # DOCKER AUTH
+      # INSTALL NATIVE PKCS11 (SoftHSM2)
       # ============================================================
 
-      - name: Configure Docker authentication
+      - name: Install SoftHSM2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2 opensc
+
+      - name: Configure SoftHSM
+        run: |
+          mkdir -p softhsm2-tokens
+
+          cat > softhsm2.conf <<EOF
+          directories.tokendir = $PWD/softhsm2-tokens
+          objectstore.backend = file
+          log.level = INFO
+          EOF
+
+          echo "SOFTHSM2_CONF=$PWD/softhsm2.conf" >> $GITHUB_ENV
+
+      - name: Initialize PKCS11 token
+        run: |
+          softhsm2-util --init-token \
+            --free \
+            --label "GitHubToken" \
+            --so-pin 1234 \
+            --pin 1234
+
+      - name: Generate PKCS11 keypair
+        run: |
+          pkcs11-tool \
+            --module /usr/lib/softhsm/libsofthsm2.so \
+            --login \
+            --pin 1234 \
+            --keypairgen \
+            --key-type rsa:2048 \
+            --id 01 \
+            --label github-key
+
+      # ============================================================
+      # DOCKER AUTH FOR SIGNUM REPO
+      # ============================================================
+
+      - name: Configure Docker auth
         shell: bash
         env:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
-          set -euo pipefail
           mkdir -p "$DOCKER_CONFIG"
 
           cat > "$DOCKER_CONFIG/config.json" <<EOF
@@ -97,108 +103,51 @@ jobs:
           }
           EOF
 
-          chmod 600 "$DOCKER_CONFIG/config.json"
-          mkdir -p "$HOME/.docker"
-          cp "$DOCKER_CONFIG/config.json" "$HOME/.docker/config.json"
-
-          echo "Docker authentication configured."
-
       # ============================================================
-      # RESOLVE IMAGE
+      # RUN SIGNUM AGENT WITH NATIVE PKCS11
       # ============================================================
 
-      - name: Resolve agent image
-        id: resolve_image
-        shell: bash
-        run: |
-          IMAGE="${{ inputs.signum_agent_image }}"
-          if [ -z "${IMAGE}" ]; then
-            IMAGE="${DEFAULT_SIGNUM_AGENT_IMAGE}"
-          fi
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "Using image: ${IMAGE}"
-
-      # ============================================================
-      # RUN SIGNUM AGENT
-      # ============================================================
-
-      - name: Run Signum Agent container
+      - name: Run Signum Agent
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          SIGNUM_AGENT_IMAGE: ${{ steps.resolve_image.outputs.image }}
         run: |
-          set -euo pipefail
-
-          mkdir -p filestosign
-          echo 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
-
-          docker pull "${SIGNUM_AGENT_IMAGE}"
+          docker pull $SIGNUM_AGENT_IMAGE
 
           docker rm -f signum-agent >/dev/null 2>&1 || true
 
           docker run -d \
             --name signum-agent \
             -p 8080:8080 \
-            -v "$PWD/filestosign:/mnt/filestosign" \
             -e SIGNUM_HOSTNAME \
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            "${SIGNUM_AGENT_IMAGE}"
+            -e PKCS11_MODULE_PATH=/pkcs11/libsofthsm2.so \
+            -v /usr/lib/softhsm/libsofthsm2.so:/pkcs11/libsofthsm2.so:ro \
+            -v $PWD/softhsm2-tokens:/var/lib/softhsm/tokens \
+            $SIGNUM_AGENT_IMAGE
 
           sleep 5
-          docker ps
+          docker logs signum-agent | tail -n 50
 
       # ============================================================
-      # EXTRACT PKCS11 MODULE FROM CONTAINER
+      # CREATE FILE TO SIGN
       # ============================================================
 
-      - name: Extract PKCS11 module from container
-        shell: bash
+      - name: Create file to sign
         run: |
-          set -euo pipefail
-
-          mkdir -p "${PKCS11_WORK_DIR}"
-
-          echo "Locating signum-pkcs11.so inside container..."
-
-          MODULE_PATH=$(docker exec signum-agent sh -c "find / -name 'signum-pkcs11.so' 2>/dev/null | head -n 1")
-
-          if [ -z "${MODULE_PATH}" ]; then
-            echo "❌ Could not locate signum-pkcs11.so inside container"
-            exit 1
-          fi
-
-          echo "Found at: ${MODULE_PATH}"
-
-          docker cp signum-agent:"${MODULE_PATH}" "${PKCS11_WORK_MODULE}"
-
-          chmod 755 "${PKCS11_WORK_MODULE}"
-
-          file "${PKCS11_WORK_MODULE}"
+          mkdir -p filestosign
+          echo "Hello from Signum + native PKCS11 demo" > filestosign/file.txt
 
       # ============================================================
-      # PKCS11 SLOT LISTING
+      # (Placeholder) CALL SIGNUM AGENT TO SIGN
       # ============================================================
 
-      - name: PKCS11 slot listing
-        shell: bash
+      - name: Placeholder - trigger signing
         run: |
-          set -euo pipefail
-
-          docker run --rm \
-            -v "$PWD/${PKCS11_WORK_MODULE}:${PKCS11_MOUNT_PATH}:ro" \
-            ghcr.io/open-sc/opensc:latest \
-            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots
-
-      # ============================================================
-      # CLEANUP
-      # ============================================================
-
-      - name: Cleanup container
-        if: always()
-        run: docker rm -f signum-agent >/dev/null 2>&1 || true
+          echo "At this point you would call the Signum Agent API"
+          echo "It will use the mounted native PKCS11 module"
