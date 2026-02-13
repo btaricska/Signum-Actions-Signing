@@ -112,15 +112,50 @@ jobs:
       # SIGN JSON FILE USING PKCS11 VIA SIGNUM AGENT
       # ============================================================
 
-      - name: Sign JSON file
+      - name: Sign JSON file using any available slot
         shell: bash
         env:
           TMP_DIR: ${{ runner.temp }}/$FILES_DIR
           CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
         run: |
+          # Find the first slot with a present token
+          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots | grep "Slot" | head -n1 | awk '{print $2}')
+          if [ -z "$SLOT" ]; then
+            echo "❌ No slot with a present token found"
+            exit 1
+          fi
+
+          # List private keys in that slot
+          docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot $SLOT --list-objects --type privkey
+
+          # List certificates in that slot
+          docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot $SLOT --list-objects --type cert
+
+          # Use the first private key ID for signing
+          KEY_ID=$(docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --slot $SLOT --list-objects --type privkey | grep "ID:" | head -n1 | awk '{print $2}')
+          if [ -z "$KEY_ID" ]; then
+            echo "❌ No private key found in slot $SLOT"
+            exit 1
+          fi
+
+          # Sign the JSON file
           docker exec $CONTAINER_NAME pkcs11-tool \
             --module /usr/lib/libkeyfactorpkcs11.so \
+            --slot $SLOT \
+            --login \
             --sign \
             --input-file "/mnt/$FILES_DIR/file.json" \
             --output-file "/mnt/$FILES_DIR/file.json.sig" \
-            --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
+            --id "$KEY_ID"
+
+          echo "✅ File signed successfully. Output: file.json.sig"
+
+      # ============================================================
+      # UPLOAD SIGNED FILE AS ARTIFACT
+      # ============================================================
+
+      - name: Upload signed JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-json
+          path: ${{ runner.temp }}/$FILES_DIR/file.json.sig
