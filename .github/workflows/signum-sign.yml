@@ -25,6 +25,7 @@ jobs:
       PKCS11_REPO_MODULE: pkcs11/signum-pkcs11.so
       PKCS11_WORK_MODULE: pkcs11-work/signum-pkcs11.so
       PKCS11_MOUNT_PATH: /pkcs11/signum-pkcs11.so
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
       - name: Checkout
@@ -36,21 +37,44 @@ jobs:
           echo "## Signum Container Agent Support Usage Notes" >> "$GITHUB_STEP_SUMMARY"
           echo "Support issues https://support.keyfactor.com/" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Configure Docker auth for keyfactor.jfrog.io
+      - name: Preflight required variables and secrets
+        shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ vars.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ vars.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ vars.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ vars.SIGNUM_PASSWORD }}
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+          SIGNUM_PKCS11_MODULE_B64: ${{ secrets.SIGNUM_PKCS11_MODULE_B64 }}
+        run: |
+          set -euo pipefail
+          missing=0
+
+          need () { if [ -z "${2:-}" ]; then echo "Missing $1"; missing=1; fi; }
+
+          need "vars.SIGNUM_HOSTNAME" "${SIGNUM_HOSTNAME}"
+          need "vars.SIGNUM_CLIENTID" "${SIGNUM_CLIENTID}"
+          need "vars.SIGNUM_USERNAME" "${SIGNUM_USERNAME}"
+          need "vars.SIGNUM_PASSWORD" "${SIGNUM_PASSWORD}"
+          need "secrets.JFROG_DOCKER_AUTH" "${JFROG_DOCKER_AUTH}"
+          need "secrets.SIGNUM_PKCS11_MODULE_B64" "${SIGNUM_PKCS11_MODULE_B64}"
+
+          if [ "${missing}" -ne 0 ]; then
+            echo "One or more required values are missing. Fix repo Variables or Secrets." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "Preflight ok" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configure Docker auth for keyfactor.jfrog.io (single token)
         shell: bash
         env:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
 
-          if [ -z "${JFROG_DOCKER_AUTH:-}" ]; then
-            echo "ERROR: Missing secret JFROG_DOCKER_AUTH."
-            echo "Set it to the 'auth' value from the Artifactory auth.json snippet (the long YnJp... string)."
-            exit 1
-          fi
-
-          mkdir -p "$HOME/.docker"
-          cat > "$HOME/.docker/config.json" <<EOF
+          mkdir -p "$DOCKER_CONFIG"
+          cat > "$DOCKER_CONFIG/config.json" <<EOF
           {
             "auths": {
               "keyfactor.jfrog.io": {
@@ -59,9 +83,24 @@ jobs:
             }
           }
           EOF
+          chmod 600 "$DOCKER_CONFIG/config.json"
 
+          # Also write to default location for safety
+          mkdir -p "$HOME/.docker"
+          cp "$DOCKER_CONFIG/config.json" "$HOME/.docker/config.json"
           chmod 600 "$HOME/.docker/config.json"
-          echo "Docker auth configured for keyfactor.jfrog.io"
+
+          echo "Docker auth written"
+          ls -la "$DOCKER_CONFIG/config.json" || true
+
+          # Fallback: do an explicit docker login using decoded user:token from the same auth blob
+          # auth blob is base64(username:token)
+          decoded="$(printf '%s' "${JFROG_DOCKER_AUTH}" | base64 -d || true)"
+          user="${decoded%%:*}"
+          pass="${decoded#*:}"
+          if [ -n "${user:-}" ] && [ -n "${pass:-}" ] && [ "${user}" != "${decoded}" ]; then
+            echo "${pass}" | docker login keyfactor.jfrog.io -u "${user}" --password-stdin
+          fi
 
       - name: Resolve agent image ref
         id: img
@@ -97,12 +136,10 @@ jobs:
           echo "SIGNUM_PASSWORD set? $([[ -n "${SIGNUM_PASSWORD:-}" ]] && echo yes || echo no)" | tee -a basic-checks.txt
           echo "Image: ${SIGNUM_AGENT_IMAGE}" | tee -a basic-checks.txt
 
-          echo "== Ensure there is something to sign ==" | tee ensure-file.txt
           mkdir -p filestosign
           if [ ! -f "filestosign/example-script.ps1" ]; then
             printf '%s\n' 'Write-Host "Hello from Signum signing demo"' > filestosign/example-script.ps1
           fi
-          ls -la filestosign/example-script.ps1 | tee -a ensure-file.txt
 
           echo "== Pull Signum agent image ==" | tee docker-pull.txt
           docker pull "${SIGNUM_AGENT_IMAGE}" 2>&1 | tee -a docker-pull.txt
@@ -124,65 +161,43 @@ jobs:
 
           docker ps -a | sed -n '1,25p' | tee signum-container-status.txt
           docker port signum-agent | tee signum-container-ports.txt || true
-
-          echo "== Wait briefly for service startup ==" | tee startup-wait.txt
           sleep 3
 
           echo "== Prepare PKCS11 module ==" | tee pkcs11-module-prep.txt
           mkdir -p pkcs11-work
 
-          MODULE_ON_DISK=""
-          if [ -f "${PKCS11_REPO_MODULE}" ]; then
-            MODULE_ON_DISK="${PKCS11_REPO_MODULE}"
-            echo "Using PKCS11 module from repo ${PKCS11_REPO_MODULE}" | tee -a pkcs11-module-prep.txt
-          elif [ -n "${SIGNUM_PKCS11_MODULE_B64:-}" ]; then
-            echo "Using PKCS11 module from secret SIGNUM_PKCS11_MODULE_B64" | tee -a pkcs11-module-prep.txt
-            printf '%s' "${SIGNUM_PKCS11_MODULE_B64}" | base64 -d > "${PKCS11_WORK_MODULE}"
-            chmod 755 "${PKCS11_WORK_MODULE}" || true
-            MODULE_ON_DISK="${PKCS11_WORK_MODULE}"
-          else
-            echo "No PKCS11 module available. Provide pkcs11/signum-pkcs11.so in repo or secret SIGNUM_PKCS11_MODULE_B64" | tee -a pkcs11-module-prep.txt
-          fi
-
-          if [ -n "${MODULE_ON_DISK}" ]; then
-            file "${MODULE_ON_DISK}" | tee pkcs11-module-file.txt || true
-            ls -la "${MODULE_ON_DISK}" | tee pkcs11-module-ls.txt || true
-          fi
+          MODULE_ON_DISK="${PKCS11_WORK_MODULE}"
+          printf '%s' "${SIGNUM_PKCS11_MODULE_B64}" | base64 -d > "${PKCS11_WORK_MODULE}"
+          chmod 755 "${PKCS11_WORK_MODULE}" || true
+          file "${PKCS11_WORK_MODULE}" | tee pkcs11-module-file.txt || true
+          ls -la "${PKCS11_WORK_MODULE}" | tee pkcs11-module-ls.txt || true
 
           echo "== PKCS11 slot listing using OpenSC helper container ==" | tee pkcs11-slots.txt
           : > pkcs11-slots.txt
 
-          if [ -z "${MODULE_ON_DISK}" ]; then
-            echo "PKCS11 module not found so slot listing cannot run" | tee -a pkcs11-slots.txt
-          else
-            docker pull ghcr.io/open-sc/opensc:latest >/dev/null 2>&1 || true
+          docker pull ghcr.io/open-sc/opensc:latest >/dev/null 2>&1 || true
 
-            docker run --rm \
-              -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
-              ghcr.io/open-sc/opensc:latest \
-              pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots 2>&1 | tee -a pkcs11-slots.txt || true
+          docker run --rm \
+            -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
+            ghcr.io/open-sc/opensc:latest \
+            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-slots 2>&1 | tee -a pkcs11-slots.txt || true
 
+          echo "" | tee -a pkcs11-slots.txt
+          echo "== PKCS11 cert objects no login ==" | tee -a pkcs11-slots.txt
+          docker run --rm \
+            -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
+            ghcr.io/open-sc/opensc:latest \
+            pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
+
+          if [ -n "${SIGNUM_PKCS11_PIN:-}" ]; then
             echo "" | tee -a pkcs11-slots.txt
-            echo "== PKCS11 cert objects no login ==" | tee -a pkcs11-slots.txt
+            echo "== PKCS11 cert objects with login ==" | tee -a pkcs11-slots.txt
             docker run --rm \
               -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
               ghcr.io/open-sc/opensc:latest \
-              pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
-
-            if [ -n "${SIGNUM_PKCS11_PIN:-}" ]; then
-              echo "" | tee -a pkcs11-slots.txt
-              echo "== PKCS11 cert objects with login ==" | tee -a pkcs11-slots.txt
-              docker run --rm \
-                -v "$PWD/${MODULE_ON_DISK}:${PKCS11_MOUNT_PATH}:ro" \
-                ghcr.io/open-sc/opensc:latest \
-                pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --login --pin "${SIGNUM_PKCS11_PIN}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
-            else
-              echo "" | tee -a pkcs11-slots.txt
-              echo "SIGNUM_PKCS11_PIN not set skipping logged in listing" | tee -a pkcs11-slots.txt
-            fi
+              pkcs11-tool --module "${PKCS11_MOUNT_PATH}" --login --pin "${SIGNUM_PKCS11_PIN}" --list-objects --type cert 2>&1 | tee -a pkcs11-slots.txt || true
           fi
 
-          echo "== Agent logs tail ==" | tee signum-agent.log
           docker logs signum-agent | tail -n 500 | tee signum-agent.log || true
 
       - name: Cleanup container
@@ -199,13 +214,10 @@ jobs:
           if-no-files-found: ignore
           path: |
             basic-checks.txt
-            ensure-file.txt
             docker-pull.txt
             docker-run.txt
             signum-container-status.txt
             signum-container-ports.txt
-            signum-api-probe.txt
-            signum-certs.txt
             pkcs11-module-prep.txt
             pkcs11-module-file.txt
             pkcs11-module-ls.txt
