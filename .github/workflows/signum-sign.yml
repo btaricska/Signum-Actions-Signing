@@ -56,14 +56,14 @@ jobs:
         run: |
           mkdir -p "$DOCKER_CONFIG"
           cat > "$DOCKER_CONFIG/config.json" <<EOF
-          {
-            "auths": {
-              "keyfactor.jfrog.io": {
-                "auth": "${JFROG_DOCKER_AUTH}"
-              }
-            }
-          }
-          EOF
+{
+  "auths": {
+    "keyfactor.jfrog.io": {
+      "auth": "${JFROG_DOCKER_AUTH}"
+    }
+  }
+}
+EOF
 
       # ============================================================
       # RUN SIGNUM AGENT
@@ -87,44 +87,48 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -v $RUNNER_TEMP/$FILES_DIR:/mnt/$FILES_DIR \
+            -v $GITHUB_WORKSPACE/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
 
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE FILE TO SIGN
+      # CREATE JSON FILE TO SIGN
       # ============================================================
-      - name: Create file to sign
+      - name: Create JSON file to sign
         shell: bash
         run: |
-          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
+          TMP_DIR="$GITHUB_WORKSPACE/$FILES_DIR"
           mkdir -p "$TMP_DIR"
-          echo "Hello from Signum + PKCS11 demo" > "$TMP_DIR/file.txt"
+          cat > "$TMP_DIR/file.json" <<EOF
+{
+  "message": "Hello from Signum + PKCS11 demo",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
 
       # ============================================================
-      # SIGN FILE USING EXISTING PKCS11 KEY IN SIGNUM AGENT
+      # SIGN JSON FILE USING EXISTING PKCS11 KEY IN SIGNUM AGENT
       # ============================================================
-      - name: Sign file using Signum Agent + PKCS11
+      - name: Sign JSON file with Signum Agent + PKCS11
         shell: bash
         run: |
-          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
-          # Replace --id with the ID of the key you want to use
+          TMP_DIR="$GITHUB_WORKSPACE/$FILES_DIR"
           docker exec $CONTAINER_NAME pkcs11-tool \
             --module /usr/lib/libkeyfactorpkcs11.so \
             --sign \
             --login \
             --pin 1234 \
-            --input-file "/mnt/$FILES_DIR/file.txt" \
-            --output-file "/mnt/$FILES_DIR/file.txt.sig" \
+            --input-file "/mnt/$FILES_DIR/file.json" \
+            --output-file "/mnt/$FILES_DIR/file.json.sig" \
             --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
 
       # ============================================================
-      # UPLOAD SIGNED FILE AS ARTIFACT
+      # UPLOAD SIGNED JSON AS ARTIFACT
       # ============================================================
-      - name: Upload signed file
+      - name: Upload signed JSON
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: "$RUNNER_TEMP/$FILES_DIR/file.txt.sig"
+          path: "$GITHUB_WORKSPACE/$FILES_DIR/file.json.sig"
