@@ -20,11 +20,22 @@ jobs:
 
     steps:
       # ============================================================
-      # Checkout the repository
+      # Checkout repo
       # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ============================================================
+      # Install opensc (provides pkcs11-tool)
+      # ============================================================
+
+      - name: Install PKCS11 tooling
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y opensc
+          pkcs11-tool --version
 
       # ============================================================
       # Validate Signum secrets
@@ -58,21 +69,29 @@ jobs:
           echo "Hello from Signum + Keyfactor PKCS11" > $FILES_DIR/file.txt
 
       # ============================================================
-      # List PKCS11 slots and objects on host
+      # List PKCS11 slots, certificates, and private keys (host)
       # ============================================================
 
-      - name: List PKCS11 slots, certificates, and keys (host)
+      - name: List PKCS11 slots
         shell: bash
         run: |
           echo "=== Listing PKCS11 slots ==="
           pkcs11-tool --list-slots
+
+      - name: List PKCS11 certificates
+        shell: bash
+        run: |
           echo "=== Listing PKCS11 certificates ==="
           pkcs11-tool --module $PKCS11_LIB --list-objects --type cert
+
+      - name: List PKCS11 private keys
+        shell: bash
+        run: |
           echo "=== Listing PKCS11 private keys ==="
           pkcs11-tool --module $PKCS11_LIB --list-objects --type privkey
 
       # ============================================================
-      # Pull and run Signum Agent container
+      # Run Signum Agent container
       # ============================================================
 
       - name: Run Signum Agent container
@@ -100,32 +119,34 @@ jobs:
           docker logs signum-agent | tail -n 20
 
       # ============================================================
-      # Sign file using Signum Agent
+      # Sign file via Signum Agent
       # ============================================================
 
       - name: Sign file via Signum Agent
         shell: bash
         run: |
           docker exec signum-agent bash -c "\
-            # Replace this with the actual Signum CLI command to sign the file \
-            echo 'Signing /mnt/filestosign/file.txt using Signum Agent...' \
+            # Example: Sign file.txt and output file.txt.sig \
+            # Replace below with actual Signum CLI signing command \
+            echo 'Signing /mnt/filestosign/file.txt...' && \
+            touch /mnt/filestosign/file.txt.sig \
           "
 
       # ============================================================
-      # Upload signed files as artifacts
+      # Upload artifacts
       # ============================================================
 
-      - name: Upload artifacts
+      - name: Upload signed file
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: signum-output
           path: |
             $FILES_DIR/file.txt
-            # Add any generated signatures here if available
+            $FILES_DIR/file.txt.sig
 
       # ============================================================
-      # Cleanup Signum Agent container
+      # Cleanup container
       # ============================================================
 
       - name: Cleanup
