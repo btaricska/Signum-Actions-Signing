@@ -1,4 +1,4 @@
-name: Sign Files via Signum Agent + Native PKCS11
+name: Sign Files with Signum Agent + PKCS#11
 
 on:
   workflow_dispatch:
@@ -8,11 +8,11 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   sign:
     runs-on: ubuntu-latest
-
     env:
       FILES_DIR: filestosign
       PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
@@ -24,25 +24,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate secrets
-        shell: bash
-        env:
-          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+      # ============================================================
+      # Validate secrets
+      # ============================================================
+      - name: Validate required secrets
         run: |
           set -euo pipefail
-          for s in SIGNUM_PKCS11_PIN JFROG_DOCKER_AUTH; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD SIGNUM_PKCS11_PIN JFROG_DOCKER_AUTH; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
             fi
           done
-          echo "✅ Required secrets present."
-
-      - name: Configure Docker auth
-        shell: bash
+          echo "✅ All required secrets present."
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail
         env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+
+      # ============================================================
+      # Configure Docker auth for Signum agent
+      # ============================================================
+      - name: Configure Docker auth
         run: |
           mkdir -p "$DOCKER_CONFIG"
           cat > "$DOCKER_CONFIG/config.json" <<EOF
@@ -54,43 +61,59 @@ jobs:
             }
           }
           EOF
+        shell: /usr/bin/bash
+        env:
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
 
-      - name: Pull Signum Agent
-        shell: bash
+      # ============================================================
+      # Pull and run Signum Agent
+      # ============================================================
+      - name: Start Signum Agent container
         run: |
-          docker pull $SIGNUM_AGENT_IMAGE
           docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
-          docker create --name $CONTAINER_NAME $SIGNUM_AGENT_IMAGE
+          docker pull $SIGNUM_AGENT_IMAGE
+          docker run -d --name $CONTAINER_NAME \
+            -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
+            -e SIGNUM_HOSTNAME="${{ secrets.SIGNUM_HOSTNAME }}" \
+            -e SIGNUM_CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" \
+            -e SIGNUM_USERNAME="${{ secrets.SIGNUM_USERNAME }}" \
+            -e SIGNUM_PASSWORD="${{ secrets.SIGNUM_PASSWORD }}" \
+            $SIGNUM_AGENT_IMAGE
+          sleep 5
+          docker logs $CONTAINER_NAME | tail -n 20
+        shell: /usr/bin/bash
 
-      - name: Install PKCS11 tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y opensc pcscd
-
-      - name: Create file(s) to sign
+      # ============================================================
+      # Create file to sign (for demo/testing)
+      # ============================================================
+      - name: Create file to sign
         run: |
           mkdir -p $FILES_DIR
           echo "Hello from Signum + PKCS11 demo" > $FILES_DIR/file.txt
+        shell: /usr/bin/bash
 
-      - name: Sign files via PKCS11
-        shell: bash
-        env:
-          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
+      # ============================================================
+      # Sign files using PKCS#11 module
+      # ============================================================
+      - name: Sign files
         run: |
-          mkdir -p $FILES_DIR/signed
           for f in $FILES_DIR/*; do
-            filename=$(basename "$f")
-            pkcs11-tool \
+            base=$(basename "$f")
+            docker exec $CONTAINER_NAME pkcs11-tool \
               --module $PKCS11_LIB \
-              --login --pin "$SIGNUM_PKCS11_PIN" \
               --sign \
-              --input-file "$FILES_DIR/$filename" \
-              --output-file "$FILES_DIR/signed/$filename.sig" \
-              --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
+              --input-file "/mnt/$FILES_DIR/$base" \
+              --output-file "/mnt/$FILES_DIR/$base.sig" \
+              --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89 \
+              --pin "${{ secrets.SIGNUM_PKCS11_PIN }}"
           done
+        shell: /usr/bin/bash
 
+      # ============================================================
+      # Upload signed files as artifacts
+      # ============================================================
       - name: Upload signed files
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: $FILES_DIR/signed/
+          path: ${{ github.workspace }}/$FILES_DIR/*.sig
