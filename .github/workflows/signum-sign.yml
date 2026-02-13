@@ -1,101 +1,3 @@
-name: Sign File via Signum Agent + PKCS11
-
-on:
-  workflow_dispatch:
-  push:
-    branches: ["main"]
-
-permissions:
-  contents: read
-
-jobs:
-  sign:
-    runs-on: ubuntu-latest
-
-    env:
-      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      FILES_DIR: filestosign
-      CONTAINER_NAME: signum-agent
-      DOCKER_CONFIG: ${{ github.workspace }}/.docker
-
-    steps:
-      # ============================================================
-      # CHECKOUT REPO
-      # ============================================================
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # ============================================================
-      # VALIDATE REQUIRED SECRETS
-      # ============================================================
-
-      - name: Validate Signum & JFrog secrets
-        shell: bash
-        env:
-          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-        run: |
-          set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
-            if [ -z "${!s:-}" ]; then
-              echo "❌ Missing secret: $s"
-              exit 1
-            fi
-          done
-          echo "✅ All required secrets present."
-
-      # ============================================================
-      # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
-      # ============================================================
-
-      - name: Configure Docker auth
-        shell: bash
-        env:
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-        run: |
-          mkdir -p "$DOCKER_CONFIG"
-          cat > "$DOCKER_CONFIG/config.json" <<EOF
-          {
-            "auths": {
-              "keyfactor.jfrog.io": {
-                "auth": "${JFROG_DOCKER_AUTH}"
-              }
-            }
-          }
-          EOF
-
-      # ============================================================
-      # RUN SIGNUM AGENT
-      # ============================================================
-
-      - name: Run Signum Agent
-        shell: bash
-        env:
-          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-        run: |
-          docker pull $SIGNUM_AGENT_IMAGE
-          docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
-
-          docker run -d \
-            --name $CONTAINER_NAME \
-            -p 8080:8080 \
-            -e SIGNUM_HOSTNAME \
-            -e SIGNUM_CLIENTID \
-            -e SIGNUM_USERNAME \
-            -e SIGNUM_PASSWORD \
-            -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
-            $SIGNUM_AGENT_IMAGE
-
-          sleep 5
-          docker logs $CONTAINER_NAME | tail -n 50
-
       # ============================================================
       # CREATE FILE TO SIGN
       # ============================================================
@@ -103,9 +5,9 @@ jobs:
       - name: Create file to sign
         shell: bash
         run: |
-          mkdir -p "$FILES_DIR"
-          chmod u+rwx "$FILES_DIR"
-          echo "Hello from Signum + PKCS11 demo" > "$FILES_DIR/file.txt"
+          # Use a workspace folder not under Git control
+          mkdir -p "$GITHUB_WORKSPACE/$FILES_DIR"
+          echo "Hello from Signum + PKCS11 demo" > "$GITHUB_WORKSPACE/$FILES_DIR/file.txt"
 
       # ============================================================
       # SIGN FILES USING SIGNUM AGENT'S BUILT-IN PKCS11
@@ -114,7 +16,7 @@ jobs:
       - name: Sign files via Signum Agent
         shell: bash
         run: |
-          for f in $FILES_DIR/*; do
+          for f in "$GITHUB_WORKSPACE/$FILES_DIR"/*; do
             docker exec $CONTAINER_NAME pkcs11-tool \
               --module /pkcs11/libkeyfactorpkcs11.so \
               --sign \
@@ -131,4 +33,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: ${{ env.FILES_DIR }}/*.sig
+          path: "$GITHUB_WORKSPACE/$FILES_DIR"/*.sig
