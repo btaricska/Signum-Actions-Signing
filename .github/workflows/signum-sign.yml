@@ -14,22 +14,20 @@ jobs:
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
+      FILES_DIR: tmp-files
       CONTAINER_NAME: signum-agent
-      PKCS11_LIB: /usr/lib/libkeyfactorpkcs11.so
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
     steps:
       # ============================================================
       # CHECKOUT REPO
       # ============================================================
-
       - name: Checkout
         uses: actions/checkout@v4
 
       # ============================================================
       # VALIDATE REQUIRED SECRETS
       # ============================================================
-
       - name: Validate Signum & JFrog secrets
         shell: bash
         env:
@@ -51,7 +49,6 @@ jobs:
       # ============================================================
       # CONFIGURE DOCKER AUTH FOR SIGNUM IMAGE
       # ============================================================
-
       - name: Configure Docker auth
         shell: bash
         env:
@@ -71,7 +68,6 @@ jobs:
       # ============================================================
       # RUN SIGNUM AGENT
       # ============================================================
-
       - name: Run Signum Agent
         shell: bash
         env:
@@ -81,7 +77,9 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           docker pull $SIGNUM_AGENT_IMAGE
+
           docker rm -f $CONTAINER_NAME >/dev/null 2>&1 || true
+
           docker run -d \
             --name $CONTAINER_NAME \
             -p 8080:8080 \
@@ -89,43 +87,58 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -v $RUNNER_TEMP:/mnt/tmp-files \
+            -v $RUNNER_TEMP/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
+
           sleep 5
           docker logs $CONTAINER_NAME | tail -n 50
 
       # ============================================================
-      # CREATE FILE TO SIGN (FULL ACCESS)
+      # CREATE FILE TO SIGN
       # ============================================================
-
       - name: Create file to sign
         shell: bash
         run: |
-          TMP_DIR="$RUNNER_TEMP"
+          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
           mkdir -p "$TMP_DIR"
           echo "Hello from Signum + PKCS11 demo" > "$TMP_DIR/file.txt"
 
       # ============================================================
-      # SIGN FILE USING SIGNUM AGENT + PKCS11
+      # GENERATE PRIVATE KEY INSIDE SIGNUM AGENT (PKCS#11)
       # ============================================================
-
-      - name: Sign files with Signum Agent
+      - name: Generate PKCS11 private key in container
         shell: bash
         run: |
-          TMP_DIR="$RUNNER_TEMP"
           docker exec $CONTAINER_NAME pkcs11-tool \
-            --module $PKCS11_LIB \
+            --module /usr/lib/libkeyfactorpkcs11.so \
+            --keypairgen \
+            --key-type rsa:2048 \
+            --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89 \
+            --label github-key \
+            --login \
+            --pin 1234
+
+      # ============================================================
+      # SIGN FILE USING PKCS#11 PRIVATE KEY
+      # ============================================================
+      - name: Sign file using Signum Agent + PKCS11
+        shell: bash
+        run: |
+          TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
+          docker exec $CONTAINER_NAME pkcs11-tool \
+            --module /usr/lib/libkeyfactorpkcs11.so \
             --sign \
-            --input-file "/mnt/tmp-files/file.txt" \
-            --output-file "/mnt/tmp-files/file.txt.sig" \
+            --login \
+            --pin 1234 \
+            --input-file "/mnt/$FILES_DIR/file.txt" \
+            --output-file "/mnt/$FILES_DIR/file.txt.sig" \
             --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
 
       # ============================================================
-      # UPLOAD SIGNED FILES AS ARTIFACTS
+      # UPLOAD SIGNED FILE AS ARTIFACT
       # ============================================================
-
-      - name: Upload signed files
+      - name: Upload signed file
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: "$RUNNER_TEMP/file.txt.sig"
+          path: "$RUNNER_TEMP/$FILES_DIR/file.txt.sig"
