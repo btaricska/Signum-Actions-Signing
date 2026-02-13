@@ -56,14 +56,14 @@ jobs:
         run: |
           mkdir -p "$DOCKER_CONFIG"
           cat > "$DOCKER_CONFIG/config.json" <<EOF
-{
-  "auths": {
-    "keyfactor.jfrog.io": {
-      "auth": "${JFROG_DOCKER_AUTH}"
-    }
-  }
-}
-EOF
+          {
+            "auths": {
+              "keyfactor.jfrog.io": {
+                "auth": "${JFROG_DOCKER_AUTH}"
+              }
+            }
+          }
+          EOF
 
       # ============================================================
       # RUN SIGNUM AGENT
@@ -97,38 +97,4 @@ EOF
       # CREATE JSON FILE TO SIGN
       # ============================================================
       - name: Create JSON file to sign
-        shell: bash
-        run: |
-          TMP_DIR="$GITHUB_WORKSPACE/$FILES_DIR"
-          mkdir -p "$TMP_DIR"
-          cat > "$TMP_DIR/file.json" <<EOF
-{
-  "message": "Hello from Signum + PKCS11 demo",
-  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-}
-EOF
-
-      # ============================================================
-      # SIGN JSON FILE USING EXISTING PKCS11 KEY IN SIGNUM AGENT
-      # ============================================================
-      - name: Sign JSON file with Signum Agent + PKCS11
-        shell: bash
-        run: |
-          TMP_DIR="$GITHUB_WORKSPACE/$FILES_DIR"
-          docker exec $CONTAINER_NAME pkcs11-tool \
-            --module /usr/lib/libkeyfactorpkcs11.so \
-            --sign \
-            --login \
-            --pin 1234 \
-            --input-file "/mnt/$FILES_DIR/file.json" \
-            --output-file "/mnt/$FILES_DIR/file.json.sig" \
-            --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
-
-      # ============================================================
-      # UPLOAD SIGNED JSON AS ARTIFACT
-      # ============================================================
-      - name: Upload signed JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-files
-          path: "$GITHUB_WORKSPACE/$FILES_DIR/file.json.sig"
+        shell:
