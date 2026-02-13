@@ -44,10 +44,10 @@ jobs:
               exit 1
             fi
           done
-          echo "✅ All required secrets present."
+          echo "✅ Secrets validated"
 
       # ============================================================
-      # Configure Docker auth for Signum image
+      # Configure Docker authentication
       # ============================================================
       - name: Configure Docker auth
         shell: bash
@@ -88,7 +88,6 @@ jobs:
             -e SIGNUM_PASSWORD \
             -v $PWD/$FILES_DIR:/mnt/$FILES_DIR \
             $SIGNUM_AGENT_IMAGE
-
           echo "⏳ Waiting for PKCS11 module to become ready..."
           for i in {1..30}; do
             if docker exec $CONTAINER_NAME pkcs11-tool --module /usr/lib/libkeyfactorpkcs11.so --list-slots >/dev/null 2>&1; then
@@ -110,7 +109,7 @@ jobs:
           echo "✅ JSON file created"
 
       # ============================================================
-      # PKCS11 signing
+      # Sign JSON file via PKCS11
       # ============================================================
       - name: Sign JSON file
         shell: bash
@@ -128,25 +127,23 @@ jobs:
           }
           echo "✅ Input file exists"
 
-          echo "🔍 Detecting first slot with a present token..."
-          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool \
-            --module "$MODULE" \
-            --list-slots \
-            | awk '/Slot/ {slot=$2} /token state:/ && /present/ {print slot; exit}')
+          echo "🔍 Detecting first initialized token slot..."
+          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots \
+                | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
 
           if [ -z "${SLOT:-}" ]; then
-            echo "❌ No slot with a present token found"
+            echo "❌ No slot with an initialized token found"
             exit 1
           fi
           echo "✅ Using slot: $SLOT"
 
           echo "🔑 Extracting first private key ID..."
           KEY_ID=$(docker exec $CONTAINER_NAME pkcs11-tool \
-            --module "$MODULE" \
-            --slot "$SLOT" \
-            --login \
-            --list-objects --type privkey \
-            | awk '/ID:/ {print $2; exit}')
+                   --module "$MODULE" \
+                   --slot "$SLOT" \
+                   --login \
+                   --list-objects --type privkey \
+                   | awk '/ID:/ {print $2; exit}')
 
           if [ -z "${KEY_ID:-}" ]; then
             echo "❌ No private key found in slot $SLOT"
@@ -176,9 +173,9 @@ jobs:
           echo "✅ Signing completed successfully"
 
       # ============================================================
-      # Upload signed JSON artifact
+      # Upload signed file as artifact
       # ============================================================
-      - name: Upload signed JSON
+      - name: Upload signed file
         uses: actions/upload-artifact@v4
         with:
           name: signed-json
