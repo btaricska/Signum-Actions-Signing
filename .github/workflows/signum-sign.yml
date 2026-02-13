@@ -6,9 +6,6 @@ on:
       - 'filestosign/**'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   sign:
     runs-on: ubuntu-latest
@@ -30,18 +27,17 @@ jobs:
       # ---------------------------------------------
       # 2️⃣ Validate required secrets
       # ---------------------------------------------
-      - name: Validate Signum secrets
+      - name: Validate secrets
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          SIGNUM_PKCS11_PIN: ${{ secrets.SIGNUM_PKCS11_PIN }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD SIGNUM_PKCS11_PIN JFROG_DOCKER_AUTH; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -50,12 +46,10 @@ jobs:
           echo "✅ All required secrets present."
 
       # ---------------------------------------------
-      # 3️⃣ Configure Docker auth for private repo
+      # 3️⃣ Configure Docker auth for JFrog
       # ---------------------------------------------
       - name: Configure Docker auth
         shell: bash
-        env:
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           mkdir -p "$DOCKER_CONFIG"
           cat > "$DOCKER_CONFIG/config.json" <<EOF
@@ -69,7 +63,7 @@ jobs:
           EOF
 
       # ---------------------------------------------
-      # 4️⃣ Pull and run Signum Agent
+      # 4️⃣ Pull and run Signum Agent container
       # ---------------------------------------------
       - name: Start Signum agent container
         shell: bash
@@ -95,42 +89,40 @@ jobs:
           docker logs $CONTAINER_NAME | tail -n 20
 
       # ---------------------------------------------
-      # 5️⃣ List PKCS11 objects (optional debug)
+      # 5️⃣ List certificates (optional)
       # ---------------------------------------------
-      - name: List certificates in agent
+      - name: List PKCS11 certificates
         shell: bash
         run: |
           set -euo pipefail
           docker exec $CONTAINER_NAME pkcs11-tool \
             --module $PKCS11_LIB \
-            --login --pin "${{ secrets.SIGNUM_PKCS11_PIN }}" \
-            --list-objects --type cert
+            --list-objects --type cert || true
 
       # ---------------------------------------------
-      # 6️⃣ Sign files
+      # 6️⃣ Sign files using PKCS11
       # ---------------------------------------------
       - name: Sign files
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p signed_files
+          mkdir -p $FILES_DIR/signed
           for f in $FILES_DIR/*; do
             base=$(basename "$f")
             docker exec $CONTAINER_NAME pkcs11-tool \
               --module $PKCS11_LIB \
               --sign \
               --input-file "/mnt/$FILES_DIR/$base" \
-              --output-file "/mnt/$FILES_DIR/$base.sig" \
-              --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89 \
-              --pin "${{ secrets.SIGNUM_PKCS11_PIN }}"
-            echo "Signed $base -> $base.sig"
+              --output-file "/mnt/$FILES_DIR/signed/$base.sig" \
+              --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89
+            echo "✅ Signed $base -> signed/$base.sig"
           done
 
       # ---------------------------------------------
-      # 7️⃣ Upload signed files as artifacts
+      # 7️⃣ Upload signed files
       # ---------------------------------------------
       - name: Upload signed files
         uses: actions/upload-artifact@v4
         with:
           name: signed-files
-          path: $FILES_DIR/*.sig
+          path: $FILES_DIR/signed/*.sig
