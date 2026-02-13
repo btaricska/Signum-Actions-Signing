@@ -104,27 +104,13 @@ jobs:
           echo "Hello from Signum + PKCS11 demo" > "$TMP_DIR/file.txt"
 
       # ============================================================
-      # GENERATE PRIVATE KEY INSIDE SIGNUM AGENT (PKCS#11)
-      # ============================================================
-      - name: Generate PKCS11 private key in container
-        shell: bash
-        run: |
-          docker exec $CONTAINER_NAME pkcs11-tool \
-            --module /usr/lib/libkeyfactorpkcs11.so \
-            --keypairgen \
-            --key-type rsa:2048 \
-            --id B93E1D6BB2B7763DFE7775D3CAA6828ECEBABE89 \
-            --label github-key \
-            --login \
-            --pin 1234
-
-      # ============================================================
-      # SIGN FILE USING PKCS#11 PRIVATE KEY
+      # SIGN FILE USING EXISTING PKCS11 KEY IN SIGNUM AGENT
       # ============================================================
       - name: Sign file using Signum Agent + PKCS11
         shell: bash
         run: |
           TMP_DIR="$RUNNER_TEMP/$FILES_DIR"
+          # Replace --id with the ID of the key you want to use
           docker exec $CONTAINER_NAME pkcs11-tool \
             --module /usr/lib/libkeyfactorpkcs11.so \
             --sign \
