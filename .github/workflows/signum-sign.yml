@@ -2,11 +2,6 @@ name: Sign file via Signum + PKCS11
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main"]
-
-permissions:
-  contents: read
 
 jobs:
   sign:
@@ -22,13 +17,6 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install OpenSC (pkcs11-tool)
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y opensc
-          pkcs11-tool -h
 
       - name: Validate required Signum secrets
         shell: bash
@@ -53,24 +41,6 @@ jobs:
           mkdir -p $FILES_DIR
           echo "Hello from Signum + PKCS11" > $FILES_DIR/file.txt
 
-      - name: List PKCS11 slots
-        shell: bash
-        run: |
-          echo "=== Listing PKCS11 slots ==="
-          pkcs11-tool --list-slots
-
-      - name: List PKCS11 certificates
-        shell: bash
-        run: |
-          echo "=== Listing PKCS11 certificates ==="
-          pkcs11-tool --module $PKCS11_LIB --list-objects --type cert
-
-      - name: List PKCS11 private keys
-        shell: bash
-        run: |
-          echo "=== Listing PKCS11 private keys ==="
-          pkcs11-tool --module $PKCS11_LIB --list-objects --type privkey
-
       - name: Run Signum Agent container
         shell: bash
         env:
@@ -92,17 +62,34 @@ jobs:
           sleep 5
           docker logs signum-agent | tail -n 20
 
-      - name: Sign file using Signum Agent
+      - name: List PKCS11 slots inside Signum Agent
         shell: bash
         run: |
-          docker exec signum-agent bash -c "\
-            echo 'Signing /mnt/filestosign/file.txt...' && \
-            # Replace below with Signum CLI signing command \
-            touch /mnt/filestosign/file.txt.sig \
-          "
+          echo "=== Listing PKCS11 slots inside Signum Agent ==="
+          docker exec signum-agent pkcs11-tool --module $PKCS11_LIB --list-slots
+
+      - name: List certificates inside Signum Agent
+        shell: bash
+        run: |
+          echo "=== Listing PKCS11 certificates ==="
+          docker exec signum-agent pkcs11-tool --module $PKCS11_LIB --list-objects --type cert
+
+      - name: List private keys inside Signum Agent
+        shell: bash
+        run: |
+          echo "=== Listing PKCS11 private keys ==="
+          docker exec signum-agent pkcs11-tool --module $PKCS11_LIB --list-objects --type privkey
+
+      - name: Sign file inside Signum Agent
+        shell: bash
+        run: |
+          echo "=== Signing file inside Signum Agent ==="
+          docker exec signum-agent pkcs11-tool --module $PKCS11_LIB \
+            --login --pin 1234 \
+            --sign --input-file /mnt/filestosign/file.txt \
+            --output-file /mnt/filestosign/file.txt.sig
 
       - name: Upload signed file
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: signum-output
@@ -110,6 +97,6 @@ jobs:
             $FILES_DIR/file.txt
             $FILES_DIR/file.txt.sig
 
-      - name: Cleanup container
+      - name: Cleanup Signum Agent container
         if: always()
         run: docker rm -f signum-agent >/dev/null 2>&1 || true
