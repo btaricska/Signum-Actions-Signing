@@ -1,4 +1,4 @@
-name: Sign Single JSON via SignServer (all-in-one)
+name: Sign JSON via SignServer
 
 on:
   workflow_dispatch:
@@ -13,154 +13,94 @@ jobs:
   sign:
     runs-on: ubuntu-latest
 
-    # <-- Hardcoded to the endpoint you provided (no secret/input required)
     env:
-      SIGNSERVER_ENDPOINT: "https://signserverdemo.eastus2.cloudapp.azure.com/signserver/rest/v1/workers/PlainSigner/processV"
-      FILES_DIR: filestosign
-      TIMEOUT_SEC: "120"
+      SIGNSERVER_ENDPOINT: "https://signserverdemo.eastus2.cloudapp.azure.com/signserver/rest/v1/workers/PlainSigner/process"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Debug: show endpoint and workspace
-        run: |
-          echo "SIGNSERVER_ENDPOINT=${SIGNSERVER_ENDPOINT}"
-          echo "Workspace: $(pwd)"
-          ls -la
-
-      - name: Create JSON, POST to SignServer, save signature (PowerShell)
+      - name: Create JSON and Sign via SignServer
         shell: pwsh
-        env:
-          FILES_DIR: ${{ env.FILES_DIR }}
-          SIGNSERVER_ENDPOINT: ${{ env.SIGNSERVER_ENDPOINT }}
-          TIMEOUT_SEC: ${{ env.TIMEOUT_SEC }}
         run: |
-          # Ensure endpoint exists
-          if (-not $env:SIGNSERVER_ENDPOINT) {
-            Write-Error "SIGNSERVER_ENDPOINT not set in environment. Aborting."
-            exit 1
-          }
-          Write-Host "Using SignServer endpoint: $env:SIGNSERVER_ENDPOINT"
+          Write-Host "Using endpoint: $env:SIGNSERVER_ENDPOINT"
 
-          # Ensure files folder
-          if (-not (Test-Path -Path $env:FILES_DIR)) {
-            New-Item -ItemType Directory -Path $env:FILES_DIR | Out-Null
-            Write-Host "Created folder: $env:FILES_DIR"
+          # Create folder
+          $dir = "filestosign"
+          if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir | Out-Null
           }
 
-          # Create a small JSON file
-          $sample = @{ message = "Hello from SignServer - $(Get-Date -Format u)" }
-          $filePath = Join-Path $env:FILES_DIR "file.json"
-          $sample | ConvertTo-Json -Depth 5 | Set-Content -Path $filePath -Encoding utf8
-          Write-Host "Wrote sample JSON to $filePath"
+          # Create small JSON file
+          $jsonContent = @{
+            message = "Hello from GitHub Actions"
+            timestamp = (Get-Date -Format u)
+          }
 
-          # Read file text (raw) and build payload matching your example
+          $filePath = Join-Path $dir "file.json"
+          $jsonContent | ConvertTo-Json -Depth 5 | Set-Content -Path $filePath -Encoding utf8
+          Write-Host "Created JSON file: $filePath"
+
+          # Read file content as text (matches your original example)
           $fileText = Get-Content -Path $filePath -Raw -Encoding utf8
-          $payload = @{
+
+          # Build payload exactly like your example
+          $requestPayload = @{
             metaData = @{
               additionalProp1 = "value1"
               additionalProp2 = "value2"
               additionalProp3 = "value3"
             }
-            filename = (Split-Path -Path $filePath -Leaf)
             data = $fileText
           } | ConvertTo-Json -Depth 10
 
-          Write-Host "Sending POST to SignServer..."
           try {
-            $resp = Invoke-RestMethod -Uri $env:SIGNSERVER_ENDPOINT -Method Post -Headers @{ 'Content-Type' = 'application/json' } -Body $payload -TimeoutSec ([int]$env:TIMEOUT_SEC) -ErrorAction Stop
-            Write-Host "Request succeeded. Processing response..."
-          } catch {
-            Write-Error "REST call failed: $_"
-            if ($_.Exception.Response -ne $null) {
-              try {
-                $errStream = $_.Exception.Response.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($errStream)
-                $errBody = $reader.ReadToEnd()
-                Write-Host "Server response: $errBody"
-                $errBody | Out-File -FilePath "$filePath.sig.error" -Encoding utf8
-              } catch {
-                Write-Warning "Failed to read error response: $_"
+            Write-Host "Sending request to SignServer..."
+            $response = Invoke-RestMethod `
+              -Uri $env:SIGNSERVER_ENDPOINT `
+              -Method Post `
+              -Headers @{ 'Content-Type' = 'application/json' } `
+              -Body $requestPayload `
+              -TimeoutSec 120 `
+              -ErrorAction Stop
+
+            Write-Host "Request successful."
+
+            $sigPath = "$filePath.sig"
+
+            # If response is JSON with signature field
+            if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains "signature") {
+              $sigValue = $response.signature
+              if ($sigValue -match '^[A-Za-z0-9+/=]+$') {
+                [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($sigValue))
+                Write-Host "Saved decoded signature to $sigPath"
+              } else {
+                $sigValue | Out-File -FilePath $sigPath -Encoding utf8
+                Write-Host "Saved raw signature text to $sigPath"
               }
             }
-            throw
-          }
-
-          # Attempt to extract signature
-          $sigPath = "$filePath.sig"
-          $sigJsonPath = "$filePath.sig.json"
-          $wrote = $false
-
-          if ($null -ne $resp) {
-            # If JSON (PSCustomObject), try common fields
-            if ($resp -is [System.Management.Automation.PSCustomObject]) {
-              $candidates = @()
-              if ($resp.PSObject.Properties.Name -contains 'signature') { $candidates += $resp.signature }
-              if ($resp.PSObject.Properties.Name -contains 'sig')       { $candidates += $resp.sig }
-              if ($resp.PSObject.Properties.Name -contains 'result') {
-                try {
-                  $r = $resp.result
-                  if ($r -is [System.Management.Automation.PSCustomObject]) {
-                    if ($r.PSObject.Properties.Name -contains 'signature') { $candidates += $r.signature }
-                    if ($r.PSObject.Properties.Name -contains 'sig')       { $candidates += $r.sig }
-                  }
-                } catch {}
-              }
-
-              foreach ($c in $candidates) {
-                if ($null -ne $c -and $c -is [string]) {
-                  # base64? (basic heuristic)
-                  if ($c -match '^[A-Za-z0-9\+/]+={0,2}$') {
-                    try {
-                      [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($c))
-                      Write-Host "Saved signature to $sigPath (decoded from JSON field)"
-                      $wrote = $true
-                      break
-                    } catch {
-                      Write-Warning "Failed to base64-decode candidate signature: $_"
-                    }
-                  } else {
-                    $c | Out-File -FilePath $sigPath -Encoding utf8
-                    Write-Host "Saved signature to $sigPath (raw text from JSON field)"
-                    $wrote = $true
-                    break
-                  }
-                }
-              }
-
-              if (-not $wrote) {
-                Write-Warning "No usable signature field in JSON response; saving full JSON to $sigJsonPath for inspection"
-                $resp | ConvertTo-Json -Depth 10 | Out-File -FilePath $sigJsonPath -Encoding utf8
-              }
-            } else {
-              # raw response string -> check base64
-              $respString = [string]$resp
-              if ($respString -and ($respString -match '^[A-Za-z0-9\+/]+={0,2}$')) {
-                try {
-                  [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($respString))
-                  Write-Host "Saved signature to $sigPath (decoded from raw base64 response)"
-                  $wrote = $true
-                } catch {
-                  Write-Warning "Response looked like base64 but decode failed: $_"
-                }
-              }
-              if (-not $wrote) {
+            else {
+              # If response is raw (maybe base64)
+              $respString = [string]$response
+              if ($respString -match '^[A-Za-z0-9+/=]+$') {
+                [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($respString))
+                Write-Host "Saved decoded signature to $sigPath"
+              } else {
                 $respString | Out-File -FilePath $sigPath -Encoding utf8
-                Write-Host "Saved raw server response to $sigPath"
-                $wrote = $true
+                Write-Host "Saved raw response to $sigPath"
               }
             }
-          } else {
-            Write-Warning "Server returned null response"
-          }
 
-          if (-not $wrote) {
-            Write-Warning "Signature was not produced. Check $sigJsonPath or $filePath.sig.error for details."
+          }
+          catch {
+            Write-Error "Error occurred: $_"
+            if ($_.Exception.Response -ne $null) {
+              $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+              $errorDetails = $reader.ReadToEnd()
+              Write-Host "Server Response: $errorDetails"
+            }
             exit 1
           }
-
-          Write-Host "Signature saved to: $sigPath"
 
       - name: Upload signature artifact
         uses: actions/upload-artifact@v4
