@@ -65,12 +65,18 @@ jobs:
           if [ -z "$SLOT" ]; then
             echo "❌ No initialized token slot found in container"
             echo "🔑 Initializing slot 0 with SO PIN '$SO_PIN' and user PIN '$USER_PIN'..."
-            
+
             # Initialize the token if it's not already initialized
             docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot 0 --init-token --so-pin "$SO_PIN" --pin "$USER_PIN" --label "Keyfactor for Linux"
-            
-            # Assign slot 0 if initialization was successful
-            SLOT="0"
+
+            # Check if initialization was successful
+            SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
+            if [ -z "$SLOT" ]; then
+              echo "❌ Failed to initialize token in slot 0."
+              exit 1
+            fi
+
+            echo "✅ Slot 0 initialized successfully, now using slot $SLOT"
           else
             echo "✅ Found initialized token in slot: $SLOT"
           fi
@@ -101,7 +107,7 @@ jobs:
           echo "✅ Signing completed successfully"
 
       - name: Upload signature file as artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: signed-file
           path: file.json.sig
