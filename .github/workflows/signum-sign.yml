@@ -129,7 +129,7 @@ jobs:
         echo "✅ Input file exists inside container"
 
         # List all available slots for debugging with more detailed output
-        echo "🔍 Listing all Keyfactor slots (with verbose output)..."
+        echo "🔍 Listing all Keyfactor slots (verbose)..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots --verbose
 
         # Detect first initialized token slot
@@ -198,4 +198,3 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: signed-json
-        path: file.json.sig
