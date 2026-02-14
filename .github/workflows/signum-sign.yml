@@ -107,7 +107,7 @@ jobs:
           echo "✅ Signing completed successfully"
 
       - name: Upload signature file as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: signed-file
           path: file.json.sig
