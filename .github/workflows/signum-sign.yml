@@ -19,6 +19,8 @@ jobs:
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
       OPENSSL_MODULE_PATH: /usr/lib/libkeyfactorpkcs11.so
       PKCS11_SLOT: "0"  # Slot to use for signing
+      SO_PIN: "admin123"  # Admin PIN (SO PIN)
+      USER_PIN: "foo1234"  # User PIN
 
     steps:
       # ============================================================
@@ -112,27 +114,25 @@ jobs:
           echo "✅ JSON file created"
 
       # ============================================================
-      # Configure OpenSSL for PKCS11
+      # Initialize Token if not initialized
       # ============================================================
-      - name: Configure OpenSSL PKCS11 Engine
+      - name: Initialize PKCS11 token if not initialized
         shell: bash
         run: |
-          set -e
-          echo "✅ Configuring OpenSSL for PKCS11 engine..."
+          set -euo pipefail
+
+          # Check if the token is initialized
+          SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module $OPENSSL_MODULE_PATH --list-slots \
+                | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
           
-          # Edit OpenSSL config to use PKCS11
-          sudo bash -c 'cat >> /usr/lib/ssl/openssl.cnf <<EOF
-          [openssl_init]
-          engines = engine_section
-
-          [engine_section]
-          pkcs11 = pkcs11_section
-
-          [pkcs11_section]
-          engine_id = pkcs11
-          MODULE_PATH = /usr/lib/libkeyfactorpkcs11.so
-          init = 0
-          EOF'
+          if [ -z "$SLOT" ]; then
+            echo "❌ No initialized token slot found"
+            echo "🔑 Initializing token slot with SO PIN '$SO_PIN' and user PIN '$USER_PIN'..."
+            docker exec $CONTAINER_NAME pkcs11-tool --module $OPENSSL_MODULE_PATH --slot 0 --init-token --so-pin "$SO_PIN" --pin "$USER_PIN" --label "Keyfactor for Linux"
+            echo "✅ Token initialized"
+          else
+            echo "✅ Token already initialized in slot $SLOT"
+          fi
 
       # ============================================================
       # Sign JSON via OpenSSL PKCS11
