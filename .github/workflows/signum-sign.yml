@@ -20,13 +20,13 @@ jobs:
 
     steps:
     # ============================================================
-    # Checkout
+    # Checkout Repository
     # ============================================================
     - name: Checkout repository
       uses: actions/checkout@v4
 
     # ============================================================
-    # Validate required secrets
+    # Validate Required Secrets
     # ============================================================
     - name: Validate secrets
       shell: bash
@@ -47,7 +47,7 @@ jobs:
         echo "✅ Secrets validated"
 
     # ============================================================
-    # Docker authentication
+    # Docker Authentication
     # ============================================================
     - name: Configure Docker auth
       shell: bash
@@ -66,7 +66,7 @@ jobs:
         EOF
 
     # ============================================================
-    # Start Signum Agent
+    # Start Signum Agent Container
     # ============================================================
     - name: Start Signum Agent
       shell: bash
@@ -100,7 +100,7 @@ jobs:
         docker logs $CONTAINER_NAME | tail -n 20
 
     # ============================================================
-    # Create JSON file
+    # Create JSON File to Sign
     # ============================================================
     - name: Create JSON file to sign
       shell: bash
@@ -123,13 +123,14 @@ jobs:
         SO_PIN="admin123"  # SO PIN for initializing the token
         USER_PIN="foo123"  # User PIN for the token
 
-        # Verify input file
+        # Verify input file exists inside the container
+        echo "✅ Verifying input file exists inside the container..."
         docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
-        echo "✅ Input file exists"
+        echo "✅ Input file exists inside container"
 
-        # List all slots for debugging
-        echo "🔍 Listing all Keyfactor slots..."
-        docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots
+        # List all available slots for debugging with more detailed output
+        echo "🔍 Listing all Keyfactor slots (with verbose output)..."
+        docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots --verbose
 
         # Detect first initialized token slot
         SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots \
@@ -191,7 +192,7 @@ jobs:
         echo "✅ Signing completed successfully"
 
     # ============================================================
-    # Upload artifact for download
+    # Upload Artifact for Download
     # ============================================================
     - name: Upload signed file
       uses: actions/upload-artifact@v4
