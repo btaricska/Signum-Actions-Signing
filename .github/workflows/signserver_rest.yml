@@ -18,6 +18,7 @@ jobs:
       FILES_DIR: filestosign
       TIMEOUT_SEC: "120"
 
+    # expose job outputs so other jobs can consume them after this job completes
     outputs:
       signature_b64: ${{ steps.create_and_sign.outputs.signature_b64 }}
       signature_path: ${{ steps.create_and_sign.outputs.signature_path }}
@@ -149,13 +150,9 @@ jobs:
             }
 
             # Expose outputs for later steps / job outputs
-            # Write to GITHUB_OUTPUT (new recommended method)
             if ($sigBase64 -ne $null) {
-              # Note: ensure we escape EOF boundaries correctly
-              $outName = 'signature_b64'
-              $outVal = $sigBase64
-              Add-Content -Path $env:GITHUB_OUTPUT -Value "$outName<<EOF"
-              Add-Content -Path $env:GITHUB_OUTPUT -Value $outVal
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "signature_b64<<EOF"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "$sigBase64"
               Add-Content -Path $env:GITHUB_OUTPUT -Value "EOF"
             }
 
@@ -173,10 +170,19 @@ jobs:
             exit 1
           }
 
-      - name: Debug print: show signature base64 (short)
+      - name: Debug print: show signature base64 (first 200 chars)
+        shell: bash
         run: |
-          echo "Signature b64 (first 200 chars):"
-          head -c 200 filestosign/file.json.sig.b64 || true
+          if [ -f filestosign/file.json.sig.b64 ]; then
+            echo "Signature b64 (first 200 chars):"
+            head -c 200 filestosign/file.json.sig.b64 || true
+            echo
+          else
+            echo "No filestosign/file.json.sig.b64 present; falling back to step output"
+            echo "${{ steps.create_and_sign.outputs.signature_b64 }}" | head -c 200 || true
+            echo
+          fi
+          echo "signature_path (from step output): ${{ steps.create_and_sign.outputs.signature_path }}"
 
       - name: Upload signature artifacts
         uses: actions/upload-artifact@v4
@@ -189,7 +195,3 @@ jobs:
             filestosign/file.json.response.json
             filestosign/file.json.sig.error
 
-      - name: Show job outputs
-        run: |
-          echo "signature_b64 (truncated): ${{ substr(jobs.sign.outputs.signature_b64, 0, 200) }}"
-          echo "signature_path: ${{ jobs.sign.outputs.signature_path }}"
