@@ -23,15 +23,9 @@ jobs:
       USER_PIN: foo1234
 
     steps:
-    # ============================================================
-    # Checkout Repository
-    # ============================================================
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # ============================================================
-    # Validate Required Secrets
-    # ============================================================
     - name: Validate secrets
       shell: bash
       env:
@@ -50,9 +44,6 @@ jobs:
         done
         echo "✅ Secrets validated"
 
-    # ============================================================
-    # Docker Authentication
-    # ============================================================
     - name: Configure Docker auth
       shell: bash
       env:
@@ -69,9 +60,6 @@ jobs:
         }
         EOF
 
-    # ============================================================
-    # Start Signum Agent Container
-    # ============================================================
     - name: Start Signum Agent
       shell: bash
       env:
@@ -103,9 +91,6 @@ jobs:
         done
         docker logs $CONTAINER_NAME | tail -n 20
 
-    # ============================================================
-    # Create JSON File to Sign
-    # ============================================================
     - name: Create JSON file to sign
       shell: bash
       run: |
@@ -113,9 +98,6 @@ jobs:
         echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
         echo "✅ JSON file created"
 
-    # ============================================================
-    # PKCS11 Signing
-    # ============================================================
     - name: Sign JSON via PKCS11
       shell: bash
       run: |
@@ -176,26 +158,4 @@ jobs:
         # Sign JSON file
         echo "✍️ Signing JSON file..."
         docker exec $CONTAINER_NAME pkcs11-tool \
-          --module "$MODULE" \
-          --slot "$SLOT" \
-          --login \
-          --sign \
-          --input-file "$CONTAINER_FILE" \
-          --output-file "$CONTAINER_SIG" \
-          --id "$KEY_ID"
-
-        # Verify signature output
-        docker exec $CONTAINER_NAME test -f "$CONTAINER_SIG" || { echo "❌ Signature file was not created"; exit 1; }
-
-        # Copy signature to runner workspace
-        cp "$FILES_DIR/file.json.sig" .
-        echo "✅ Signing completed successfully"
-
-    # ============================================================
-    # Upload Artifact for Download
-    # ============================================================
-    - name: Upload signed file
-      uses: actions/upload-artifact@v4
-      with:
-        name: signed-json
-        path: file.json.sig
+         
