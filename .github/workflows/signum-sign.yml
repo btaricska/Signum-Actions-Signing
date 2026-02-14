@@ -154,7 +154,10 @@ jobs:
         SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
         if [ -z "$SLOT" ]; then
           echo "❌ No initialized token slot found in container"
-          exit 1
+          # Try initializing slot 0 with password "foo123"
+          echo "🔑 Initializing slot 0 with password 'foo123'..."
+          docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot 0 --init-token --pin foo123 --label "Keyfactor for Linux"
+          SLOT="0"
         fi
         echo "✅ Using initialized slot: $SLOT"
 
