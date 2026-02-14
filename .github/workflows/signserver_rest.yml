@@ -1,4 +1,4 @@
-name: Sign JSON via SignServer (TLS validation disabled - not restored)
+name: Sign JSON via SignServer (produce downloadable signature + outputs)
 
 on:
   workflow_dispatch:
@@ -18,11 +18,16 @@ jobs:
       FILES_DIR: filestosign
       TIMEOUT_SEC: "120"
 
+    outputs:
+      signature_b64: ${{ steps.create_and_sign.outputs.signature_b64 }}
+      signature_path: ${{ steps.create_and_sign.outputs.signature_path }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Create JSON and POST to SignServer (tls validation disabled, not restored)
+      - name: Create JSON and POST to SignServer (tls validation disabled, not restored) and write outputs
+        id: create_and_sign
         shell: pwsh
         run: |
           Write-Host "Using endpoint: $env:SIGNSERVER_ENDPOINT"
@@ -53,6 +58,8 @@ jobs:
 
           $sigPath = "$filePath.sig"
           $respFile = "$filePath.response.json"
+          $sigB64Path = "$filePath.sig.b64"
+          $sigHexPath = "$filePath.sig.hex"
 
           try {
             Write-Host "Posting payload to SignServer with Invoke-RestMethod..."
@@ -68,6 +75,8 @@ jobs:
 
             # Try to extract signature
             $wrote = $false
+            $sigBase64 = $null
+
             if ($response -is [System.Management.Automation.PSCustomObject]) {
               if ($response.PSObject.Properties.Name -contains 'signature') { $candidate = $response.signature }
               elseif ($response.PSObject.Properties.Name -contains 'sig') { $candidate = $response.sig }
@@ -75,17 +84,28 @@ jobs:
 
               if ($candidate -ne $null) {
                 $candidate = [string]$candidate
+                # if looks like base64
                 if ($candidate -match '^[A-Za-z0-9\+/]+={0,2}$') {
                   try {
+                    # write binary signature file
                     [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($candidate))
-                    Write-Host "Saved decoded signature to $sigPath"
+                    # write base64 text file
+                    $candidate | Out-File -FilePath $sigB64Path -Encoding utf8
+                    $sigBase64 = $candidate
+                    # write hex file
+                    $bytes = [Convert]::FromBase64String($candidate)
+                    ($bytes | ForEach-Object { $_.ToString("x2") }) -join "" | Out-File -FilePath $sigHexPath -Encoding utf8
+                    Write-Host "Saved decoded signature to $sigPath, $sigB64Path, and hex to $sigHexPath"
                     $wrote = $true
                   } catch {
                     Write-Warning "Failed to decode candidate signature: $_"
                   }
                 } else {
+                  # treat candidate as raw text signature
                   $candidate | Out-File -FilePath $sigPath -Encoding utf8
-                  Write-Host "Saved raw signature text to $sigPath"
+                  $candidate | Out-File -FilePath $sigB64Path -Encoding utf8
+                  Write-Host "Saved raw signature text to $sigPath and $sigB64Path"
+                  $sigBase64 = $candidate
                   $wrote = $true
                 }
               }
@@ -97,7 +117,11 @@ jobs:
               if ($respString -and ($respString -match '^[A-Za-z0-9\+/]+={0,2}$')) {
                 try {
                   [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($respString))
-                  Write-Host "Saved decoded signature to $sigPath (raw response)"
+                  $respString | Out-File -FilePath $sigB64Path -Encoding utf8
+                  $bytes = [Convert]::FromBase64String($respString)
+                  ($bytes | ForEach-Object { $_.ToString("x2") }) -join "" | Out-File -FilePath $sigHexPath -Encoding utf8
+                  $sigBase64 = $respString
+                  Write-Host "Saved decoded signature to $sigPath, $sigB64Path, and hex to $sigHexPath (raw response)"
                   $wrote = $true
                 } catch {
                   Write-Warning "Raw response looked like base64 but decode failed: $_"
@@ -106,11 +130,13 @@ jobs:
             }
 
             if (-not $wrote) {
-              # final fallback: save raw response text into .sig
+              # final fallback: save raw response text into .sig and .b64 (text)
               try {
                 $respString = (Get-Content -Path $respFile -Raw -Encoding utf8)
                 $respString | Out-File -FilePath $sigPath -Encoding utf8
-                Write-Host "Saved raw response text to $sigPath"
+                $respString | Out-File -FilePath $sigB64Path -Encoding utf8
+                Write-Host "Saved raw response text to $sigPath and $sigB64Path"
+                $sigBase64 = $respString
                 $wrote = $true
               } catch {
                 Write-Warning "Unable to save raw response to sig: $_"
@@ -122,9 +148,22 @@ jobs:
               exit 1
             }
 
+            # Expose outputs for later steps / job outputs
+            # Write to GITHUB_OUTPUT (new recommended method)
+            if ($sigBase64 -ne $null) {
+              # Note: ensure we escape EOF boundaries correctly
+              $outName = 'signature_b64'
+              $outVal = $sigBase64
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "$outName<<EOF"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value $outVal
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "EOF"
+            }
+
+            # expose signature path
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "signature_path=$sigPath"
+
           } catch {
             Write-Error "Exception during REST POST: $_"
-            # save error details if available
             if ($_.Exception -ne $null) {
               try {
                 $_.Exception | Out-String | Out-File -FilePath "$filePath.sig.error" -Encoding utf8
@@ -134,8 +173,23 @@ jobs:
             exit 1
           }
 
-      - name: Upload signature artifact
+      - name: Debug print: show signature base64 (short)
+        run: |
+          echo "Signature b64 (first 200 chars):"
+          head -c 200 filestosign/file.json.sig.b64 || true
+
+      - name: Upload signature artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: signature
-          path: filestosign/file.json.sig
+          name: signature-package
+          path: |
+            filestosign/file.json.sig
+            filestosign/file.json.sig.b64
+            filestosign/file.json.sig.hex
+            filestosign/file.json.response.json
+            filestosign/file.json.sig.error
+
+      - name: Show job outputs
+        run: |
+          echo "signature_b64 (truncated): ${{ substr(jobs.sign.outputs.signature_b64, 0, 200) }}"
+          echo "signature_path: ${{ jobs.sign.outputs.signature_path }}"
