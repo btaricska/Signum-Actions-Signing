@@ -110,9 +110,9 @@ jobs:
         echo "✅ JSON file created"
 
     # ============================================================
-    # PKCS11 Signing: Inside container and on host
+    # PKCS11 Signing: Inside container
     # ============================================================
-    - name: Sign JSON via PKCS11
+    - name: Sign JSON via PKCS11 inside container
       shell: bash
       run: |
         set -euo pipefail
@@ -133,24 +133,7 @@ jobs:
         echo "🔑 Listing private keys inside the container..."
         docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-objects --type privkey
 
-        # Install pkcs11-utils on host if not already available
-        echo "🔧 Checking if pkcs11-tool is available on host..."
-        if ! command -v pkcs11-tool &> /dev/null; then
-          echo "❌ pkcs11-tool not found on the host, installing..."
-          sudo apt update && sudo apt install -y pkcs11-utils
-        else
-          echo "✅ pkcs11-tool found on host"
-        fi
-
-        # List all PKCS11 slots on the host machine
-        echo "🔍 Listing available PKCS11 slots on the host..."
-        pkcs11-tool --module "$MODULE" --list-slots
-
-        # List private keys on the host
-        echo "🔑 Listing private keys on the host..."
-        pkcs11-tool --module "$MODULE" --list-objects --type privkey
-
-        # Extract key from the container
+        # Extract slot and initialize if needed
         SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
         if [ -z "$SLOT" ]; then
           echo "❌ No initialized token slot found in container"
