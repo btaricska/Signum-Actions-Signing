@@ -1,4 +1,4 @@
-name: Sign JSON via SignServer (bypass TLS validation - not restored)
+name: Sign JSON via SignServer (TLS validation disabled - not restored)
 
 on:
   workflow_dispatch:
@@ -22,20 +22,20 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Create JSON and POST to SignServer (certificate validation bypassed, not restored)
+      - name: Create JSON and POST to SignServer (tls validation disabled, not restored)
         shell: pwsh
         run: |
           Write-Host "Using endpoint: $env:SIGNSERVER_ENDPOINT"
           $dir = $env:FILES_DIR
           if (-not (Test-Path -Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 
-          # Create sample JSON
+          # create sample json
           $sample = @{ message = "Hello from GitHub Actions"; timestamp = (Get-Date -Format u) }
           $filePath = Join-Path $dir "file.json"
           $sample | ConvertTo-Json -Depth 5 | Set-Content -Path $filePath -Encoding utf8
           Write-Host "Wrote sample JSON to $filePath"
 
-          # Prepare payload (sending raw text in "data" as you requested)
+          # build payload (raw text in data per your requirement)
           $fileText = Get-Content -Path $filePath -Raw -Encoding utf8
           $payloadObj = @{
             metaData = @{
@@ -47,41 +47,30 @@ jobs:
           }
           $payload = $payloadObj | ConvertTo-Json -Depth 12
 
-          # --- Build HttpClient that bypasses certificate validation (NOT RESTORED) ---
-          $handler = New-Object System.Net.Http.HttpClientHandler
-          $callback = { param($sender,$cert,$chain,$sslPolicyErrors) return $true }
-          # ServerCertificateCustomValidationCallback expects a Func<HttpRequestMessage,X509Certificate2,X509Chain,SslPolicyErrors,bool>
-          $handler.ServerCertificateCustomValidationCallback = $callback
+          # --- Disable TLS validation globally for this runner process (DO NOT USE IN PRODUCTION) ---
+          Write-Warning "Disabling TLS certificate validation for this process (NOT RESTORING)."
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { param($sender,$cert,$chain,$errors) return $true }
 
-          $client = [System.Net.Http.HttpClient]::new($handler)
-          $client.Timeout = [System.TimeSpan]::FromSeconds([int]$env:TIMEOUT_SEC)
+          $sigPath = "$filePath.sig"
+          $respFile = "$filePath.response.json"
 
           try {
-            Write-Host "Posting payload to SignServer (TLS cert validation disabled for this HttpClient)..."
-            $content = New-Object System.Net.Http.StringContent($payload, [System.Text.Encoding]::UTF8, "application/json")
-            $respMessage = $client.PostAsync($env:SIGNSERVER_ENDPOINT, $content).Result
+            Write-Host "Posting payload to SignServer with Invoke-RestMethod..."
+            $response = Invoke-RestMethod -Uri $env:SIGNSERVER_ENDPOINT -Method Post -Headers @{ 'Content-Type' = 'application/json' } -Body $payload -TimeoutSec ([int]$env:TIMEOUT_SEC) -ErrorAction Stop
 
-            $respString = $respMessage.Content.ReadAsStringAsync().Result
-            $respFile = "$filePath.response.json"
-            $respString | Out-File -FilePath $respFile -Encoding utf8
-            Write-Host "Saved full response to: $respFile (HTTP status: $($respMessage.StatusCode))"
-
-            if (-not $respMessage.IsSuccessStatusCode) {
-              Write-Error "SignServer returned HTTP $($respMessage.StatusCode). See $respFile for details."
-              exit 1
+            # save raw response for debugging
+            if ($null -ne $response) {
+              $response | ConvertTo-Json -Depth 10 | Out-File -FilePath $respFile -Encoding utf8
+            } else {
+              "null" | Out-File -FilePath $respFile -Encoding utf8
             }
+            Write-Host "Saved full response to $respFile"
 
-            # Try to parse JSON response
-            $respObj = $null
-            try { $respObj = $respString | ConvertFrom-Json } catch { }
-
-            $sigPath = "$filePath.sig"
+            # Try to extract signature
             $wrote = $false
-
-            if ($respObj -ne $null) {
-              # Try common fields
-              if ($respObj.PSObject.Properties.Name -contains 'signature') { $candidate = $respObj.signature }
-              elseif ($respObj.PSObject.Properties.Name -contains 'sig') { $candidate = $respObj.sig }
+            if ($response -is [System.Management.Automation.PSCustomObject]) {
+              if ($response.PSObject.Properties.Name -contains 'signature') { $candidate = $response.signature }
+              elseif ($response.PSObject.Properties.Name -contains 'sig') { $candidate = $response.sig }
               else { $candidate = $null }
 
               if ($candidate -ne $null) {
@@ -92,7 +81,7 @@ jobs:
                     Write-Host "Saved decoded signature to $sigPath"
                     $wrote = $true
                   } catch {
-                    Write-Warning "Failed to decode base64 signature candidate: $_"
+                    Write-Warning "Failed to decode candidate signature: $_"
                   }
                 } else {
                   $candidate | Out-File -FilePath $sigPath -Encoding utf8
@@ -103,8 +92,9 @@ jobs:
             }
 
             if (-not $wrote) {
-              # Response might be raw base64
-              if ($respString -match '^[A-Za-z0-9\+/]+={0,2}$') {
+              $respString = $null
+              try { $respString = (Get-Content -Path $respFile -Raw -Encoding utf8) } catch {}
+              if ($respString -and ($respString -match '^[A-Za-z0-9\+/]+={0,2}$')) {
                 try {
                   [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($respString))
                   Write-Host "Saved decoded signature to $sigPath (raw response)"
@@ -116,28 +106,32 @@ jobs:
             }
 
             if (-not $wrote) {
-              # As final fallback, save raw response text to .sig
-              $respString | Out-File -FilePath $sigPath -Encoding utf8
-              Write-Host "Saved raw response text to $sigPath"
+              # final fallback: save raw response text into .sig
+              try {
+                $respString = (Get-Content -Path $respFile -Raw -Encoding utf8)
+                $respString | Out-File -FilePath $sigPath -Encoding utf8
+                Write-Host "Saved raw response text to $sigPath"
+                $wrote = $true
+              } catch {
+                Write-Warning "Unable to save raw response to sig: $_"
+              }
+            }
+
+            if (-not $wrote) {
+              Write-Error "Signature extraction failed. Inspect $respFile or runner logs."
+              exit 1
             }
 
           } catch {
-            Write-Error "Exception during POST: $_"
-            # Save error details if HTTP response present
-            if ($_.Exception.Response -ne $null) {
+            Write-Error "Exception during REST POST: $_"
+            # save error details if available
+            if ($_.Exception -ne $null) {
               try {
-                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $err = $reader.ReadToEnd()
-                $err | Out-File -FilePath "$filePath.sig.error" -Encoding utf8
-                Write-Host "Saved error details to $filePath.sig.error"
-              } catch {
-                Write-Warning "Could not read exception response body: $_"
-              }
+                $_.Exception | Out-String | Out-File -FilePath "$filePath.sig.error" -Encoding utf8
+                Write-Host "Saved exception info to $filePath.sig.error"
+              } catch {}
             }
             exit 1
-          } finally {
-            # Note: we intentionally do NOT restore certificate validation here.
-            Write-Host "Note: certificate validation remains bypassed for this runner process (NOT RESTORED)."
           }
 
       - name: Upload signature artifact
