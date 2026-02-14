@@ -41,10 +41,10 @@ jobs:
           $jsonContent | ConvertTo-Json -Depth 5 | Set-Content -Path $filePath -Encoding utf8
           Write-Host "Created JSON file: $filePath"
 
-          # Read file content as text (matches your original example)
+          # Read file content as raw text
           $fileText = Get-Content -Path $filePath -Raw -Encoding utf8
 
-          # Build payload exactly like your example
+          # Build payload
           $requestPayload = @{
             metaData = @{
               additionalProp1 = "value1"
@@ -68,7 +68,10 @@ jobs:
 
             $sigPath = "$filePath.sig"
 
-            # If response is JSON with signature field
+            # Save full response for debugging
+            $response | ConvertTo-Json -Depth 10 | Out-File -FilePath "$filePath.response.json" -Encoding utf8
+
+            # Try to extract signature
             if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains "signature") {
               $sigValue = $response.signature
               if ($sigValue -match '^[A-Za-z0-9+/=]+$') {
@@ -80,7 +83,7 @@ jobs:
               }
             }
             else {
-              # If response is raw (maybe base64)
+              # Handle raw response
               $respString = [string]$response
               if ($respString -match '^[A-Za-z0-9+/=]+$') {
                 [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($respString))
