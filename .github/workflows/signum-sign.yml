@@ -121,7 +121,7 @@ jobs:
         CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
         CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
         SO_PIN="admin123"  # SO PIN for initializing the token
-        USER_PIN="foo123"  # User PIN for the token
+        USER_PIN="foo1234"  # Updated User PIN for the token
 
         # Verify input file exists inside the container
         echo "✅ Verifying input file exists inside the container..."
