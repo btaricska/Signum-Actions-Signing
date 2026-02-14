@@ -2,40 +2,26 @@ name: Sign Single JSON via SignServer (all-in-one)
 
 on:
   workflow_dispatch:
-    inputs:
-      endpoint:
-        description: "SignServer endpoint (optional override)"
-        required: false
-        type: string
   push:
     branches:
       - main
 
-permissions: 
+permissions:
   contents: read
 
 jobs:
   sign:
     runs-on: ubuntu-latest
 
+    # <-- Hardcoded to the endpoint you provided (no secret/input required)
+    env:
+      SIGNSERVER_ENDPOINT: "https://signserverdemo.eastus2.cloudapp.azure.com/signserver/rest/v1/workers/PlainSigner/processV"
+      FILES_DIR: filestosign
+      TIMEOUT_SEC: "120"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # if endpoint passed as workflow input, set it
-      - name: Set endpoint from workflow input
-        if: ${{ github.event.inputs.endpoint != '' }}
-        run: echo "SIGNSERVER_ENDPOINT=${{ github.event.inputs.endpoint }}" >> $GITHUB_ENV
-
-      # fallback to secret if no input provided
-      - name: Set endpoint from secret (fallback)
-        if: ${{ github.event.inputs.endpoint == '' }}
-        run: |
-          if [ -z "${{ secrets.SIGNSERVER_ENDPOINT || '' }}" ]; then
-            echo "SIGNSERVER_ENDPOINT secret not set and no workflow input provided. Failing."
-            exit 1
-          fi
-          echo "SIGNSERVER_ENDPOINT=${{ secrets.SIGNSERVER_ENDPOINT }}" >> $GITHUB_ENV
 
       - name: Debug: show endpoint and workspace
         run: |
@@ -46,9 +32,9 @@ jobs:
       - name: Create JSON, POST to SignServer, save signature (PowerShell)
         shell: pwsh
         env:
-          FILES_DIR: filestosign
+          FILES_DIR: ${{ env.FILES_DIR }}
           SIGNSERVER_ENDPOINT: ${{ env.SIGNSERVER_ENDPOINT }}
-          TIMEOUT_SEC: 120
+          TIMEOUT_SEC: ${{ env.TIMEOUT_SEC }}
         run: |
           # Ensure endpoint exists
           if (-not $env:SIGNSERVER_ENDPOINT) {
