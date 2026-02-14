@@ -120,6 +120,8 @@ jobs:
         MODULE="/usr/lib/libkeyfactorpkcs11.so"
         CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
         CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
+        SO_PIN="admin123"  # Set the Security Officer (SO) PIN for initialization
+        USER_PIN="foo123"  # User PIN
 
         # Verify input file
         docker exec $CONTAINER_NAME test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
@@ -137,9 +139,9 @@ jobs:
         SLOT=$(docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --list-slots | awk '/Slot/ {slot=$2} /token flags:/ && /initialized/ {print slot; exit}')
         if [ -z "$SLOT" ]; then
           echo "❌ No initialized token slot found in container"
-          # Try initializing slot 0 with password "foo123"
-          echo "🔑 Initializing slot 0 with password 'foo123'..."
-          docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot 0 --init-token --pin foo123 --label "Keyfactor for Linux"
+          # Try initializing slot 0 with both SO PIN and user PIN
+          echo "🔑 Initializing slot 0 with SO PIN '$SO_PIN' and user PIN '$USER_PIN'..."
+          docker exec $CONTAINER_NAME pkcs11-tool --module "$MODULE" --slot 0 --init-token --so-pin "$SO_PIN" --pin "$USER_PIN" --label "Keyfactor for Linux"
           SLOT="0"
         fi
         echo "✅ Using initialized slot: $SLOT"
