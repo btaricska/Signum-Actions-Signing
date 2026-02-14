@@ -1,0 +1,112 @@
+name: Sign JSON via SignServer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+
+    env:
+      SIGNSERVER_ENDPOINT: "https://signserverdemo.eastus2.cloudapp.azure.com/signserver/rest/v1/workers/PlainSigner/process"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create JSON and Sign via SignServer
+        shell: pwsh
+        run: |
+          Write-Host "Using endpoint: $env:SIGNSERVER_ENDPOINT"
+
+          # Create folder
+          $dir = "filestosign"
+          if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir | Out-Null
+          }
+
+          # Create small JSON file
+          $jsonContent = @{
+            message = "Hello from GitHub Actions"
+            timestamp = (Get-Date -Format u)
+          }
+
+          $filePath = Join-Path $dir "file.json"
+          $jsonContent | ConvertTo-Json -Depth 5 | Set-Content -Path $filePath -Encoding utf8
+          Write-Host "Created JSON file: $filePath"
+
+          # Read file content as raw text
+          $fileText = Get-Content -Path $filePath -Raw -Encoding utf8
+
+          # Build payload
+          $requestPayload = @{
+            metaData = @{
+              additionalProp1 = "value1"
+              additionalProp2 = "value2"
+              additionalProp3 = "value3"
+            }
+            data = $fileText
+          } | ConvertTo-Json -Depth 10
+
+          try {
+            Write-Host "Sending request to SignServer..."
+            $response = Invoke-RestMethod `
+              -Uri $env:SIGNSERVER_ENDPOINT `
+              -Method Post `
+              -Headers @{ 'Content-Type' = 'application/json' } `
+              -Body $requestPayload `
+              -TimeoutSec 120 `
+              -ErrorAction Stop
+
+            Write-Host "Request successful."
+
+            $sigPath = "$filePath.sig"
+
+            # Save full response for debugging
+            $response | ConvertTo-Json -Depth 10 | Out-File -FilePath "$filePath.response.json" -Encoding utf8
+
+            # Try to extract signature
+            if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains "signature") {
+              $sigValue = $response.signature
+              if ($sigValue -match '^[A-Za-z0-9+/=]+$') {
+                [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($sigValue))
+                Write-Host "Saved decoded signature to $sigPath"
+              } else {
+                $sigValue | Out-File -FilePath $sigPath -Encoding utf8
+                Write-Host "Saved raw signature text to $sigPath"
+              }
+            }
+            else {
+              # Handle raw response
+              $respString = [string]$response
+              if ($respString -match '^[A-Za-z0-9+/=]+$') {
+                [IO.File]::WriteAllBytes($sigPath, [Convert]::FromBase64String($respString))
+                Write-Host "Saved decoded signature to $sigPath"
+              } else {
+                $respString | Out-File -FilePath $sigPath -Encoding utf8
+                Write-Host "Saved raw response to $sigPath"
+              }
+            }
+
+          }
+          catch {
+            Write-Error "Error occurred: $_"
+            if ($_.Exception.Response -ne $null) {
+              $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+              $errorDetails = $reader.ReadToEnd()
+              Write-Host "Server Response: $errorDetails"
+            }
+            exit 1
+          }
+
+      - name: Upload signature artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signature
+          path: filestosign/file.json.sig
