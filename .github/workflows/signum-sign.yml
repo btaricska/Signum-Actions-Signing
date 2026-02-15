@@ -11,24 +11,22 @@ permissions:
 jobs:
   sign:
     runs-on: ubuntu-latest
+    # If USER_PIN is stored as an *Environment secret*, uncomment and set this:
+    # environment: prod
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
-
-      # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
-
-      # Slot fallback if we can't detect an initialized token
       PKCS11_SLOT_FALLBACK: "0"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate required inputs
+      - name: Validate secrets
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -36,17 +34,16 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-          # USER_PIN is a repo Variable, not a Secret
-          USER_PIN: ${{ vars.USER_PIN }}
+          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
           for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
             if [ -z "${!s:-}" ]; then
-              echo "❌ Missing value: $s"
+              echo "❌ Missing secret: $s"
               exit 1
             fi
           done
-          echo "✅ Inputs validated"
+          echo "✅ Secrets validated"
 
       - name: Configure Docker auth
         shell: bash
@@ -98,9 +95,7 @@ jobs:
           done
 
           echo "❌ PKCS#11 module never became ready"
-          echo "---- docker logs (tail) ----"
           docker logs "$CONTAINER_NAME" | tail -n 300 || true
-          echo "---- pkcs11-tool verbose ----"
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose || true
           exit 1
 
@@ -115,18 +110,15 @@ jobs:
       - name: Sign JSON via PKCS#11
         shell: bash
         env:
-          # USER_PIN is a repo Variable, not a Secret
-          USER_PIN: ${{ vars.USER_PIN }}
+          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          echo "✅ Verifying input file exists inside the container..."
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
+          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE"
 
-          echo "🔍 Listing slots..."
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots
 
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
@@ -137,45 +129,30 @@ jobs:
 
           if [ -z "${SLOT:-}" ]; then
             SLOT="$PKCS11_SLOT_FALLBACK"
-            echo "⚠️ Could not auto-detect an initialized token slot; defaulting to slot $SLOT"
+            echo "⚠️ Defaulting to slot $SLOT"
           else
-            echo "✅ Found initialized token slot: $SLOT"
+            echo "✅ Using initialized slot $SLOT"
           fi
 
-          echo "🔑 Listing private keys in slot $SLOT..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
             --login \
             --pin "$USER_PIN" \
-            --list-objects --type privkey || true)"
+            --list-objects --type privkey)"
 
           echo "$PRIV_OUT"
-          if [ -z "${PRIV_OUT:-}" ]; then
-            echo "❌ No private keys output returned"
-            exit 1
-          fi
 
-          echo "🔍 Selecting first private key block..."
           KEY_BLOCK="$(printf "%s\n" "$PRIV_OUT" | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
-          if [ -z "${KEY_BLOCK:-}" ]; then
-            echo "❌ No private key found in slot $SLOT"
-            exit 1
-          fi
-
           KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
           KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
           KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
-
-          echo "✅ Using private key ID: ${KEY_ID:-<none>}  Label: ${KEY_LABEL:-<none>}  Type: ${KEY_TYPE:-<unknown>}"
 
           MECH="RSA-PKCS"
           if echo "${KEY_TYPE:-}" | grep -qiE 'EC|ECDSA'; then
             MECH="ECDSA"
           fi
-          echo "ℹ️ Using mechanism: $MECH"
 
-          echo "✍️ Signing JSON file..."
           if [ -n "${KEY_ID:-}" ]; then
             docker exec "$CONTAINER_NAME" pkcs11-tool \
               --module "$PKCS11_MODULE" \
@@ -200,7 +177,6 @@ jobs:
               --output-file "$CONTAINER_SIG"
           fi
 
-          echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
 
       - name: Upload signature artifact
