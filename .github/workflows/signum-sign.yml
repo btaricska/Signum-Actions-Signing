@@ -28,6 +28,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # OPTION 1: Use USER_PIN from GitHub Secrets
+      # Create it in repo settings:
+      # Settings → Secrets and variables → Actions → New repository secret
+      # Name: USER_PIN
+      # Value: foo1234 (or your real PIN)
       - name: Validate secrets
         shell: bash
         env:
