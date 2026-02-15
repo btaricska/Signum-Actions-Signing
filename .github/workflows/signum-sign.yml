@@ -21,7 +21,7 @@ jobs:
       # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
 
-      # PKCS#11 slot default (used only if we can’t auto-detect)
+      # Slot fallback if we can't detect an initialized token
       PKCS11_SLOT_FALLBACK: "0"
 
     steps:
@@ -36,13 +36,10 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-
-          # Move pins to secrets (even for demo)
-          SO_PIN: ${{ secrets.SO_PIN }}
           USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH SO_PIN USER_PIN; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -74,10 +71,6 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-
-          # Pins (not necessarily used by the agent, but we keep consistent)
-          SO_PIN: ${{ secrets.SO_PIN }}
-          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
@@ -94,9 +87,8 @@ jobs:
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
-          echo "⏳ Waiting for PKCS#11 module to initialize (C_Initialize) ..."
+          echo "⏳ Waiting for PKCS#11 module to become ready..."
           for i in {1..90}; do
-            # We run list-slots as the readiness signal because it requires successful C_Initialize
             if docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots >/dev/null 2>&1; then
               echo "✅ PKCS#11 module is ready"
               exit 0
@@ -107,13 +99,6 @@ jobs:
           echo "❌ PKCS#11 module never became ready"
           echo "---- docker logs (tail) ----"
           docker logs "$CONTAINER_NAME" | tail -n 300 || true
-
-          echo "---- container env (subset) ----"
-          docker exec "$CONTAINER_NAME" sh -lc 'env | egrep "SIGNUM|PKCS|KEYFACTOR|PORT" || true' || true
-
-          echo "---- listening ports ----"
-          docker exec "$CONTAINER_NAME" sh -lc '(ss -lntp || netstat -lntp) 2>/dev/null || true' || true
-
           echo "---- pkcs11-tool verbose ----"
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose || true
           exit 1
@@ -142,7 +127,6 @@ jobs:
           echo "🔍 Listing slots..."
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots
 
-          # Prefer slot with initialized token; otherwise fallback
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
             | awk '
                 /^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); slot=$1}
@@ -177,13 +161,12 @@ jobs:
             exit 1
           fi
 
-          KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d '\r')"
-          KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d '\r')"
-          KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d '\r')"
+          KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
+          KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
+          KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
 
           echo "✅ Using private key ID: ${KEY_ID:-<none>}  Label: ${KEY_LABEL:-<none>}  Type: ${KEY_TYPE:-<unknown>}"
 
-          # Mechanism selection: RSA vs EC
           MECH="RSA-PKCS"
           if echo "${KEY_TYPE:-}" | grep -qiE 'EC|ECDSA'; then
             MECH="ECDSA"
