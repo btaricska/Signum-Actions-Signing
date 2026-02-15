@@ -11,16 +11,15 @@ permissions:
 jobs:
   sign:
     runs-on: ubuntu-latest
-    # If USER_PIN is stored as an *Environment secret*, uncomment and set this:
-    # environment: prod
 
     env:
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
+
+      # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
-      PKCS11_SLOT_FALLBACK: "0"
 
     steps:
       - name: Checkout repository
@@ -44,6 +43,7 @@ jobs:
             fi
           done
           echo "✅ Secrets validated"
+          echo "ℹ️ USER_PIN is set (length ${#USER_PIN})"
 
       - name: Configure Docker auth
         shell: bash
@@ -95,7 +95,9 @@ jobs:
           done
 
           echo "❌ PKCS#11 module never became ready"
+          echo "---- docker logs (tail) ----"
           docker logs "$CONTAINER_NAME" | tail -n 300 || true
+          echo "---- pkcs11-tool verbose ----"
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose || true
           exit 1
 
@@ -117,42 +119,63 @@ jobs:
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE"
+          echo "✅ Verifying input file exists inside the container..."
+          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
 
-          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots
+          echo "🔍 Listing slots..."
+          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose
 
+          # Pick the first slot that exists (don’t silently default)
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
-            | awk '
-                /^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); slot=$1}
-                /token flags:/ && /initialized/ {print slot; exit}
-              ' || true)"
+            | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
 
           if [ -z "${SLOT:-}" ]; then
-            SLOT="$PKCS11_SLOT_FALLBACK"
-            echo "⚠️ Defaulting to slot $SLOT"
-          else
-            echo "✅ Using initialized slot $SLOT"
+            echo "❌ No slots found"
+            exit 1
           fi
+          echo "✅ Using slot: $SLOT"
 
+          echo "🔎 Listing ALL objects in slot $SLOT (no login)..."
+          docker exec "$CONTAINER_NAME" pkcs11-tool \
+            --module "$PKCS11_MODULE" \
+            --slot "$SLOT" \
+            --list-objects || true
+
+          echo "🔑 Listing private keys in slot $SLOT (with login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
             --login \
             --pin "$USER_PIN" \
-            --list-objects --type privkey)"
+            --list-objects --type privkey || true)"
 
           echo "$PRIV_OUT"
+          if [ -z "${PRIV_OUT:-}" ] || echo "$PRIV_OUT" | grep -qiE 'No objects|not found'; then
+            echo "❌ No private keys found in slot $SLOT."
+            echo "➡️ Provision/generate/import a key in Signum so the agent exposes it via PKCS#11."
+            exit 1
+          fi
 
+          echo "🔍 Selecting first private key block..."
           KEY_BLOCK="$(printf "%s\n" "$PRIV_OUT" | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
+          if [ -z "${KEY_BLOCK:-}" ]; then
+            echo "❌ Could not parse a private key object block"
+            exit 1
+          fi
+
           KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
           KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
           KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
+
+          echo "✅ Using private key ID: ${KEY_ID:-<none>}  Label: ${KEY_LABEL:-<none>}  Type: ${KEY_TYPE:-<unknown>}"
 
           MECH="RSA-PKCS"
           if echo "${KEY_TYPE:-}" | grep -qiE 'EC|ECDSA'; then
             MECH="ECDSA"
           fi
+          echo "ℹ️ Using mechanism: $MECH"
 
+          echo "✍️ Signing JSON file..."
           if [ -n "${KEY_ID:-}" ]; then
             docker exec "$CONTAINER_NAME" pkcs11-tool \
               --module "$PKCS11_MODULE" \
@@ -164,7 +187,7 @@ jobs:
               --sign \
               --input-file "$CONTAINER_FILE" \
               --output-file "$CONTAINER_SIG"
-          else
+          elif [ -n "${KEY_LABEL:-}" ]; then
             docker exec "$CONTAINER_NAME" pkcs11-tool \
               --module "$PKCS11_MODULE" \
               --slot "$SLOT" \
@@ -175,8 +198,12 @@ jobs:
               --sign \
               --input-file "$CONTAINER_FILE" \
               --output-file "$CONTAINER_SIG"
+          else
+            echo "❌ Key has neither ID nor Label; cannot select it for signing"
+            exit 1
           fi
 
+          echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
 
       - name: Upload signature artifact
