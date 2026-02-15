@@ -21,6 +21,9 @@ jobs:
       # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
 
+      # Optional: expected subject fragment to help humans confirm the right cert is present
+      EXPECTED_CERT_SUBJECT: "CN=CodeSigningCertificate"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -109,7 +112,7 @@ jobs:
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created at $FILES_DIR/file.json"
 
-      - name: Sign JSON via PKCS#11
+      - name: PKCS#11 inventory + sign JSON
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
@@ -125,7 +128,6 @@ jobs:
           echo "🔍 Listing slots (verbose)..."
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose
 
-          # Pick the first slot reported by pkcs11-tool
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
             | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
 
@@ -141,17 +143,28 @@ jobs:
             --slot "$SLOT" \
             --list-objects || true
 
-          echo "🔍 Listing certificates (if any)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
+          echo "🔍 Listing certificates in slot $SLOT..."
+          CERT_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
-            --list-objects --type cert || true
+            --list-objects --type cert 2>&1 || true)"
+          echo "$CERT_OUT"
 
-          echo "🔍 Listing public keys (if any)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
+          if echo "$CERT_OUT" | grep -q "Certificate Object"; then
+            echo "✅ At least one certificate object is visible via PKCS#11"
+            if [ -n "${EXPECTED_CERT_SUBJECT:-}" ]; then
+              echo "ℹ️ If available, confirm expected subject fragment: $EXPECTED_CERT_SUBJECT"
+            fi
+          else
+            echo "⚠️ No certificate objects visible via PKCS#11"
+          fi
+
+          echo "🔍 Listing public keys in slot $SLOT..."
+          PUB_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
-            --list-objects --type pubkey || true
+            --list-objects --type pubkey 2>&1 || true)"
+          echo "$PUB_OUT"
 
           echo "🔑 Listing private keys in slot $SLOT (with login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
@@ -160,19 +173,22 @@ jobs:
             --login \
             --pin "$USER_PIN" \
             --list-objects --type privkey 2>&1 || true)"
-
           echo "$PRIV_OUT"
 
           # Hard fail unless we see an actual Private Key Object
           if ! echo "$PRIV_OUT" | grep -q "Private Key Object"; then
             echo "❌ No private key objects visible in slot $SLOT."
-            echo "➡️ Signum/Agent is connected, but no signing key is provisioned/assigned/exposed via PKCS#11."
-            echo "➡️ Create/provision a key in Signum and ensure this agent/user has access, then rerun."
+            echo "➡️ The certificate may exist in Signum, but its private key is not provisioned/assigned/exposed to this agent via PKCS#11."
+            echo "➡️ Ensure the CodeSigningCertificate private key is available to this agent/user, then rerun."
             exit 1
           fi
 
           echo "🔍 Selecting first private key block..."
           KEY_BLOCK="$(printf "%s\n" "$PRIV_OUT" | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
+          if [ -z "${KEY_BLOCK:-}" ]; then
+            echo "❌ Could not parse a private key object block"
+            exit 1
+          fi
 
           KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
           KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
