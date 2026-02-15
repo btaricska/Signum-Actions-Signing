@@ -28,12 +28,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # OPTION 1: Use USER_PIN from GitHub Secrets
-      # Create it in repo settings:
-      # Settings → Secrets and variables → Actions → New repository secret
-      # Name: USER_PIN
-      # Value: foo1234 (or your real PIN)
-      - name: Validate secrets
+      - name: Validate required inputs
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -41,16 +36,17 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-          USER_PIN: ${{ secrets.USER_PIN }}
+          # USER_PIN is a repo Variable, not a Secret
+          USER_PIN: ${{ vars.USER_PIN }}
         run: |
           set -euo pipefail
           for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
             if [ -z "${!s:-}" ]; then
-              echo "❌ Missing secret: $s"
+              echo "❌ Missing value: $s"
               exit 1
             fi
           done
-          echo "✅ Secrets validated"
+          echo "✅ Inputs validated"
 
       - name: Configure Docker auth
         shell: bash
@@ -119,7 +115,8 @@ jobs:
       - name: Sign JSON via PKCS#11
         shell: bash
         env:
-          USER_PIN: ${{ secrets.USER_PIN }}
+          # USER_PIN is a repo Variable, not a Secret
+          USER_PIN: ${{ vars.USER_PIN }}
         run: |
           set -euo pipefail
 
