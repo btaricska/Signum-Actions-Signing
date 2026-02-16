@@ -1,18 +1,12 @@
 name: Sign (Linux runner) via Keyfactor Agent + PKCS#11
 
 # Notes:
-# - This workflow installs the Keyfactor .deb on the runner (systemd service)
-#   instead of relying on containers that may not run systemd.
-# - Includes robust PKCS#11 listing logic to support older (pkcs11-tool)
-#   and newer (p11tool) approaches on Ubuntu 22.04+ and checks for signum-util.
-# - You must provide a secret KF_AGENT_DEB_URL containing the exact .deb URL
-#   that works in your environment.
-#
-# Required GitHub secrets:
-#   SIGNUM_HOSTNAME, SIGNUM_CLIENTID, SIGNUM_USERNAME, SIGNUM_PASSWORD
-#   KF_AGENT_DEB_URL
-# Optional:
-#   CERT_ALIAS  (to pin the certificate alias used for signing)
+# - Installs Keyfactor .deb agent on the runner using systemd service
+#   instead of container-based approaches that may not run systemd.
+# - Supports PKCS#11 listing via signum-util, p11tool, or pkcs11-tool.
+# - Required secrets: SIGNUM_HOSTNAME, SIGNUM_CLIENTID, SIGNUM_USERNAME,
+#   SIGNUM_PASSWORD, KF_AGENT_DEB_URL
+# - Optional secrets: CERT_ALIAS (to pin the signing certificate alias)
 
 on:
   workflow_dispatch:
@@ -20,15 +14,15 @@ on:
       artifact_name:
         description: Name of artifact to download containing the file to sign
         required: false
-        default: "ExeToSign"
+        default: ExeToSign
       file_to_sign:
         description: Path to file to sign (after artifact download / checkout)
         required: false
-        default: "hello-world-app.exe"
+        default: hello-world-app.exe
       sign_method:
         description: Signing method: jsign (default) or openssl (advanced)
         required: false
-        default: "jsign"
+        default: jsign
   push:
     branches: ["main"]
 
@@ -67,14 +61,14 @@ jobs:
           done
           echo "✅ Secrets validated"
 
-      - name: (Optional) Download artifact that contains file to sign
+      - name: Download optional artifact
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_name != '' }}
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
           path: .
 
-      - name: Install prerequisites (OpenSC, Java, p11 tools)
+      - name: Install prerequisites (OpenSC, Java, PKCS#11 tools)
         shell: bash
         run: |
           set -euo pipefail
@@ -84,20 +78,20 @@ jobs:
             p11-kit-tools p11-kit \
             default-jre-headless curl ca-certificates gnupg
 
-      - name: Install jsign (for Authenticode via Java)
+      - name: Install jsign (optional for Authenticode)
         shell: bash
         run: |
           set -euo pipefail
           curl -fsSL -o jsign.deb "$JSIGN_DEB_URL"
           sudo dpkg -i jsign.deb || sudo apt-get install -f -y && sudo dpkg -i jsign.deb
 
-      - name: Install Keyfactor Agent (.deb) and enable service
+      - name: Install Keyfactor Agent and enable service
         shell: bash
         env:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
-          echo "Downloading Keyfactor agent .deb from KF_AGENT_DEB_URL..."
+          echo "Downloading Keyfactor agent .deb..."
           curl -fsSL -o kf-agent.deb "$KF_AGENT_DEB_URL"
           echo "Installing Keyfactor agent..."
           sudo dpkg -i kf-agent.deb || sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb
@@ -108,7 +102,7 @@ jobs:
           echo "Service status (last 200 lines):"
           sudo journalctl -u KeyfactorService -n 200 --no-pager || true
 
-      - name: Configure agent (keyfactor-setup)
+      - name: Configure Keyfactor Agent
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -117,7 +111,7 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           set -euo pipefail
-          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null || true
+          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null
           sudo keyfactor-setup \
             hostname="$SIGNUM_HOSTNAME" \
             clientid="$SIGNUM_CLIENTID" \
@@ -147,16 +141,74 @@ jobs:
             fi
           done
           if [ -z "$FOUND" ]; then
-            echo "🔎 Searching filesystem for libkeyfactorpkcs11.so..."
             FOUND="$(sudo find / -type f -name 'libkeyfactorpkcs11.so' 2>/dev/null | head -n 1 || true)"
           fi
           if [ -z "$FOUND" ]; then
-            echo "❌ Could not locate libkeyfactorpkcs11.so on this runner."
+            echo "❌ Could not locate libkeyfactorpkcs11.so"
             exit 1
           fi
           echo "✅ Found PKCS#11 module at: $FOUND"
-          echo "::set-output name=module::$FOUND"
+          echo "module=$FOUND" >> $GITHUB_OUTPUT
 
-      # Additional steps for provider config, listing certs, selecting alias,
-      # signing with jsign or OpenSSL, and uploading artifacts follow the
-      # same structure as your original workflow, unchanged.
+      - name: Write SunPKCS11 provider config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$PKCS11_PROVIDER_CFG" <<EOF
+          name=Keyfactor
+          library=${{ steps.find_module.outputs.module }}
+          EOF
+          echo "✅ Wrote $PKCS11_PROVIDER_CFG"
+
+      - name: Determine certificate alias
+        id: choose_cert
+        shell: bash
+        env:
+          CERT_ALIAS: ${{ secrets.CERT_ALIAS || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CERT_ALIAS}" ]; then
+            echo "Using CERT_ALIAS from secrets: $CERT_ALIAS"
+            echo "alias=$CERT_ALIAS" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # Fallback: auto-select first PKCS#11 certificate via keytool
+          FIRST_ID=$(keytool -list -storetype PKCS11 \
+            -providerClass sun.security.pkcs11.SunPKCS11 \
+            -providerArg "$PKCS11_PROVIDER_CFG" -storepass NONE 2>/dev/null \
+            | grep -oP '^[0-9A-F]+' | head -n1 || true)
+          if [ -n "$FIRST_ID" ]; then
+            echo "Auto-selected alias: $FIRST_ID"
+            echo "alias=$FIRST_ID" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "❌ Could not determine certificate alias. Provide CERT_ALIAS secret."
+          exit 1
+
+      - name: Sign file with jsign
+        if: ${{ inputs.sign_method == 'jsign' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="${{ inputs.file_to_sign }}"
+          mkdir -p "$OUT_DIR"
+          cp -f "$FILE" "$OUT_DIR/"
+          jsign --storetype PKCS11 \
+                --keystore "$PKCS11_PROVIDER_CFG" \
+                --storepass NONE \
+                --alias "${{ steps.choose_cert.outputs.alias }}" \
+                "$OUT_DIR/$(basename "$FILE")"
+          echo "✅ Signed file:"
+          ls -la "$OUT_DIR"
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignedFile-Linux-Agent
+          path: signed-output/*
+
+      - name: Final status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Workflow finished. Inspect earlier logs if signing failed."
