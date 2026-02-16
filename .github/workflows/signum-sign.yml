@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      # Keep your original envs for continuity (Docker creds still validated, but container not used)
+      # Kept for continuity (Docker auth is optional; container not used in this deb-based flow)
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
@@ -25,7 +25,7 @@ jobs:
       # Optional: expected subject fragment to help humans confirm the right cert is present
       EXPECTED_CERT_SUBJECT: "CN=CodeSigningCertificate"
 
-      # Deb-based signing settings
+      # Tools / outputs
       JSIGN_DEB_URL: "https://github.com/ebourg/jsign/releases/download/6.0/jsign_6.0_all.deb"
       KF_CFG_PATH: "/etc/keyfactor/config"
       PKCS11_PROVIDER_CFG: "keyfactorpkcs11.cfg"
@@ -74,17 +74,23 @@ jobs:
           EOF
           echo "✅ Docker auth configured (optional)"
 
-      - name: Install prerequisites (OpenSC, Java, p11 tools, mingw)
+      - name: Install prerequisites (OpenSC, p11tool, Java, mingw)
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
-            p11-kit-tools p11-kit \
+            p11-kit \
+            gnutls-bin \
             default-jre-headless \
             mingw-w64 \
             curl ca-certificates
+
+          echo "✅ Tool versions:"
+          command -v pkcs11-tool && pkcs11-tool --version || true
+          command -v p11tool && p11tool --version || true
+          command -v keytool && keytool -help >/dev/null 2>&1 && echo "keytool OK" || true
 
       - name: Create a random EXE to sign (Windows PE)
         shell: bash
@@ -109,6 +115,7 @@ jobs:
           set -euo pipefail
           curl -fsSL -o jsign.deb "$JSIGN_DEB_URL"
           sudo dpkg -i jsign.deb || (sudo apt-get install -f -y && sudo dpkg -i jsign.deb)
+          jsign --version || true
 
       - name: Download & install Keyfactor Agent (.deb) and start service
         shell: bash
@@ -116,6 +123,7 @@ jobs:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
+
           echo "⬇️ Downloading Keyfactor agent .deb from:"
           echo "$KF_AGENT_DEB_URL"
           curl -fsSL -o kf-agent.deb "$KF_AGENT_DEB_URL"
@@ -128,8 +136,8 @@ jobs:
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
 
-          echo "✅ Service status (last 80 lines):"
-          sudo journalctl -u KeyfactorService -n 80 --no-pager || true
+          echo "✅ Service status (last 120 lines):"
+          sudo journalctl -u KeyfactorService -n 120 --no-pager || true
 
           echo "✅ Listening ports:"
           ss -ltnp || true
@@ -206,25 +214,22 @@ jobs:
           echo "✅ Provider config written to $PKCS11_PROVIDER_CFG"
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: List tokens/certs (p11tool preferred on 22.04+; pkcs11-tool fallback)
+      - name: Token/cert inventory (p11tool preferred on 22.04+; pkcs11-tool fallback)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.find_module.outputs.module }}
+          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
           echo "=== p11tool (preferred on Ubuntu 22.04+) ==="
           if command -v p11tool >/dev/null 2>&1; then
             p11tool --list-tokens --provider "${MODULE_PATH}" 2>/dev/null | sed -n '1,200p' || true
-          else
-            echo "p11tool not found"
           fi
 
           echo "=== pkcs11-tool (fallback) ==="
           if command -v pkcs11-tool >/dev/null 2>&1; then
             pkcs11-tool --module "${MODULE_PATH}" --list-slots --verbose 2>/dev/null || true
-          else
-            echo "pkcs11-tool not found"
           fi
 
           echo "=== keytool cert inventory ==="
@@ -265,6 +270,7 @@ jobs:
           CERT_ALIAS: ${{ steps.choose_cert.outputs.alias }}
         run: |
           set -euo pipefail
+
           mkdir -p "$OUT_DIR"
           cp -f hello-world-app.exe "$OUT_DIR/"
 
