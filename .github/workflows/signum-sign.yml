@@ -212,7 +212,7 @@ jobs:
           fi
 
           echo "✅ Found PKCS#11 module at: $FOUND"
-          echo "::set-output name=module::$FOUND"
+          echo "module=$FOUND" >> "$GITHUB_OUTPUT"
 
       - name: Write SunPKCS11 provider config for Java tools
         shell: bash
@@ -265,8 +265,8 @@ jobs:
           set -euo pipefail
 
           if [ -n "${CERT_ALIAS:-}" ]; then
-            echo "✅ Using CERT_ALIAS from secrets: $CERT_ALIAS"
-            echo "::set-output name=alias::$CERT_ALIAS"
+            echo "✅ Using CERT_ALIAS from secrets"
+            echo "alias=$CERT_ALIAS" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -279,7 +279,7 @@ jobs:
           fi
 
           echo "✅ Auto-selected cert alias: $FIRST_ID"
-          echo "::set-output name=alias::$FIRST_ID"
+          echo "alias=$FIRST_ID" >> "$GITHUB_OUTPUT"
 
       - name: Sign file with jsign (Authenticode)
         shell: bash
@@ -291,7 +291,7 @@ jobs:
           mkdir -p "$OUT_DIR"
           cp -f hello-world-app.exe "$OUT_DIR/"
 
-          echo "✍️ Signing $OUT_DIR/hello-world-app.exe using alias: $CERT_ALIAS"
+          echo "✍️ Signing $OUT_DIR/hello-world-app.exe"
           jsign \
             --storetype PKCS11 \
             --keystore "$PKCS11_PROVIDER_CFG" \
@@ -306,5 +306,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SignedFile-Linux-Agent
-          path: |
-            signed-output/*
+          path: signed-output/*
