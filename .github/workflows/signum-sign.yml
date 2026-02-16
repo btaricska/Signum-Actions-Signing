@@ -30,11 +30,10 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          USER_PIN: ${{ secrets.USER_PIN }}
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD USER_PIN KF_AGENT_DEB_URL; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -42,7 +41,7 @@ jobs:
           done
           echo "✅ Secrets validated"
 
-      - name: Install prerequisites
+      - name: Install prerequisites (OpenSC, p11tool, Java, mingw)
         shell: bash
         run: |
           set -euo pipefail
@@ -53,6 +52,10 @@ jobs:
             default-jre-headless \
             mingw-w64 \
             curl ca-certificates
+
+          echo "✅ Tool versions:"
+          command -v pkcs11-tool && pkcs11-tool --version || true
+          command -v p11tool && p11tool --version || true
 
       - name: Create a random EXE to sign (Windows PE)
         shell: bash
@@ -76,7 +79,7 @@ jobs:
           sudo dpkg -i jsign.deb || (sudo apt-get install -f -y && sudo dpkg -i jsign.deb)
           jsign --version || true
 
-      - name: Install Keyfactor Agent (.deb) and start service
+      - name: Install Keyfactor Agent (.deb) and start service (robust URL handling)
         shell: bash
         env:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
@@ -91,7 +94,7 @@ jobs:
             exit 1
           fi
           if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
-            echo "❌ KF_AGENT_DEB_URL does not look like a URL (no quotes, one line, URL only)."
+            echo "❌ KF_AGENT_DEB_URL does not look like a URL (store ONLY the URL, one line, no quotes)."
             echo "ℹ️ Length: ${#AGENT_URL}"
             exit 1
           fi
@@ -160,7 +163,7 @@ jobs:
           echo "✅ PKCS#11 module: $FOUND"
           echo "module=$FOUND" >> "$GITHUB_OUTPUT"
 
-      - name: Write SunPKCS11 config
+      - name: Write SunPKCS11 config (minimal)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
@@ -169,48 +172,93 @@ jobs:
           cat > "$PKCS11_PROVIDER_CFG" <<EOF
           name=KeyfactorPKCS11
           library=${MODULE_PATH}
-          description=Keyfactor PKCS#11 interface
           EOF
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: Choose certificate alias
+      - name: List certificates via pkcs11-tool (sanity check)
+        shell: bash
+        env:
+          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
+        run: |
+          set -euo pipefail
+          pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert
+
+      - name: Choose certificate alias via pkcs11-tool (no keytool)
         id: cert
         shell: bash
         env:
           CERT_ALIAS: ${{ secrets.CERT_ALIAS || '' }}
+          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
         run: |
           set -euo pipefail
+
           if [ -n "${CERT_ALIAS:-}" ]; then
+            echo "✅ Using CERT_ALIAS from secrets"
             echo "alias=$CERT_ALIAS" >> "$GITHUB_OUTPUT"
+            echo "alias_id=" >> "$GITHUB_OUTPUT"
+            echo "alias_label=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          OUT="$(keytool -list -storetype PKCS11 -providerClass sun.security.pkcs11.SunPKCS11 -providerArg "$PKCS11_PROVIDER_CFG" -storepass NONE 2>/dev/null || true)"
-          FIRST_ID="$(echo "$OUT" | grep -oP '^[0-9A-F]+' | head -n 1 || true)"
+          CERTS="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>/dev/null || true)"
+          echo "$CERTS"
 
-          if [ -z "${FIRST_ID:-}" ]; then
-            echo "❌ No certificate IDs found via keytool"
+          ID="$(echo "$CERTS" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r" | tr '[:lower:]' '[:upper:]')"
+          LABEL="$(echo "$CERTS" | awk -F': *' '/^ *label:/ {print $2; exit}' | tr -d "\r")"
+
+          if [ -z "${ID:-}" ] && [ -z "${LABEL:-}" ]; then
+            echo "❌ Could not extract a cert ID or label from pkcs11-tool output"
             exit 1
           fi
 
-          echo "alias=$FIRST_ID" >> "$GITHUB_OUTPUT"
+          echo "✅ Selected cert:"
+          echo "   ID:    ${ID:-<none>}"
+          echo "   Label: ${LABEL:-<none>}"
 
-      - name: Sign with jsign (Authenticode)
+          # Try ID first (usually best)
+          echo "alias=${ID:-$LABEL}" >> "$GITHUB_OUTPUT"
+          echo "alias_id=${ID:-}" >> "$GITHUB_OUTPUT"
+          echo "alias_label=${LABEL:-}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign with jsign (try ID then label)
         shell: bash
         env:
           CERT_ALIAS: ${{ steps.cert.outputs.alias }}
+          CERT_ALIAS_ID: ${{ steps.cert.outputs.alias_id }}
+          CERT_ALIAS_LABEL: ${{ steps.cert.outputs.alias_label }}
         run: |
           set -euo pipefail
+
           mkdir -p "$OUT_DIR"
           cp -f hello-world-app.exe "$OUT_DIR/"
 
-          jsign \
+          echo "✍️ Attempt 1: alias = ${CERT_ALIAS}"
+          if jsign \
             --storetype PKCS11 \
             --keystore "$PKCS11_PROVIDER_CFG" \
             --storepass NONE \
             --alias "$CERT_ALIAS" \
-            "$OUT_DIR/hello-world-app.exe"
+            "$OUT_DIR/hello-world-app.exe"; then
+            echo "✅ Signed using alias ${CERT_ALIAS}"
+          else
+            echo "⚠️ Attempt 1 failed."
 
+            if [ -n "${CERT_ALIAS_LABEL:-}" ] && [ "${CERT_ALIAS_LABEL}" != "${CERT_ALIAS}" ]; then
+              echo "✍️ Attempt 2: label alias = ${CERT_ALIAS_LABEL}"
+              jsign \
+                --storetype PKCS11 \
+                --keystore "$PKCS11_PROVIDER_CFG" \
+                --storepass NONE \
+                --alias "$CERT_ALIAS_LABEL" \
+                "$OUT_DIR/hello-world-app.exe"
+              echo "✅ Signed using label ${CERT_ALIAS_LABEL}"
+            else
+              echo "❌ No label fallback available."
+              exit 1
+            fi
+          fi
+
+          echo "✅ Output:"
           ls -la "$OUT_DIR"
 
       - name: Upload signed artifact
