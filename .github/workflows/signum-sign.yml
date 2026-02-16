@@ -30,14 +30,14 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      # Keep your original top envs for continuity (not used by the deb-based flow)
+      # Keep your original top envs for continuity (Docker creds still validated)
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
-      # PKCS#11 module path (host runner; will be discovered if different)
-      PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
+      # Default module path (may differ; we will discover)
+      PKCS11_MODULE_DEFAULT: /usr/lib/libkeyfactorpkcs11.so
 
       # Optional: expected subject fragment to help humans confirm the right cert is present
       EXPECTED_CERT_SUBJECT: "CN=CodeSigningCertificate"
@@ -61,13 +61,12 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
           USER_PIN: ${{ secrets.USER_PIN }}
-          # Optional secret; if missing we'll use workflow input
           SECRET_AGENT_URL: ${{ secrets.KF_AGENT_DEB_URL || '' }}
           INPUT_AGENT_URL: ${{ inputs.agent_deb_url }}
         run: |
           set -euo pipefail
 
-          # keep your original required secret checks
+          # Keep your original required secret checks
           for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
@@ -93,8 +92,6 @@ jobs:
           echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
           echo "AGENT_URL=${AGENT_URL}" >> $GITHUB_ENV
 
-      # We keep this step (from your file) because it uses your existing secret,
-      # but it's not required for the deb-based signing flow. It won't fail if absent.
       - name: Configure Docker auth (optional; only needed for container flow)
         shell: bash
         env:
@@ -131,7 +128,7 @@ jobs:
             default-jre-headless \
             curl ca-certificates
 
-      - name: Install jsign
+      - name: Install jsign (.deb)
         shell: bash
         run: |
           set -euo pipefail
@@ -173,7 +170,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # optional logging settings
           echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null || true
 
           sudo keyfactor-setup \
@@ -194,9 +190,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Prefer the documented path, but fall back to discovery
+          # IMPORTANT: the Keyfactor PKCS#11 module is provided by the Keyfactor agent .deb.
+          # Don't assume /usr/lib/libkeyfactorpkcs11.so exists until after installing the agent.
           CANDIDATES=(
-            "$PKCS11_MODULE"
+            "$PKCS11_MODULE_DEFAULT"
             /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so
             /usr/lib/libkeyfactorpkcs11.so
             /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so
@@ -217,6 +214,7 @@ jobs:
 
           if [ -z "$FOUND" ]; then
             echo "❌ Could not locate libkeyfactorpkcs11.so on this runner."
+            echo "➡️ This usually means the Keyfactor agent .deb was not installed successfully."
             exit 1
           fi
 
@@ -229,14 +227,18 @@ jobs:
           MODULE_PATH: ${{ steps.find_module.outputs.module }}
         run: |
           set -euo pipefail
+
+          # Use the simple Java SunPKCS11 config (matches your working approach)
           cat > "$PKCS11_PROVIDER_CFG" <<EOF
-          name=Keyfactor
+          name=KeyfactorPKCS11
           library=${MODULE_PATH}
+          description=Keyfactor PKCS#11 interface for SmartCard
           EOF
+
           echo "✅ Provider config written to $PKCS11_PROVIDER_CFG"
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: List tokens/certs (signum-util -> p11tool -> pkcs11-tool)
+      - name: List tokens/certs (signum-util -> p11tool -> pkcs11-tool) on 22.04+
         shell: bash
         env:
           MODULE_PATH: ${{ steps.find_module.outputs.module }}
@@ -246,24 +248,34 @@ jobs:
           echo "=== signum-util? ==="
           if command -v signum-util >/dev/null 2>&1; then
             signum-util --listcertificates || true
-            exit 0
+          else
+            echo "signum-util not found (expected until it ships in container; .deb agent flow is OK)."
           fi
-          echo "signum-util not found (expected until added to container; .deb agent path is fine)."
 
-          echo "=== p11tool (22.04+ preferred) ==="
+          # Per your note:
+          # - 22.04+ should prefer p11tool with --provider
+          # - pkcs11-tool works on older; keep it as a fallback
+          echo "=== p11tool (preferred on Ubuntu 22.04+) ==="
           if command -v p11tool >/dev/null 2>&1; then
             p11tool --list-tokens --provider "${MODULE_PATH}" 2>/dev/null | sed -n '1,200p' || true
           else
             echo "p11tool not found"
           fi
 
-          echo "=== pkcs11-tool (older style) ==="
+          echo "=== pkcs11-tool (fallback / older style) ==="
           if command -v pkcs11-tool >/dev/null 2>&1; then
             pkcs11-tool --module "${MODULE_PATH}" --list-slots --verbose 2>/dev/null || true
             pkcs11-tool --module "${MODULE_PATH}" -O 2>/dev/null || true
           else
             echo "pkcs11-tool not found"
           fi
+
+          echo "=== keytool (cert inventory used by signing) ==="
+          keytool -list \
+            -storetype PKCS11 \
+            -providerClass sun.security.pkcs11.SunPKCS11 \
+            -providerArg "$PKCS11_PROVIDER_CFG" \
+            -storepass NONE 2>/dev/null | grep -oP '^[0-9A-F]+ - Certificate' || true
 
       - name: Choose certificate alias (uses CERT_ALIAS secret if set)
         id: choose_cert
@@ -272,6 +284,7 @@ jobs:
           CERT_ALIAS: ${{ secrets.CERT_ALIAS || '' }}
         run: |
           set -euo pipefail
+
           if [ -n "${CERT_ALIAS:-}" ]; then
             echo "✅ Using CERT_ALIAS from secrets: $CERT_ALIAS"
             echo "::set-output name=alias::$CERT_ALIAS"
@@ -316,4 +329,15 @@ jobs:
             --storetype PKCS11 \
             --keystore "$PKCS11_PROVIDER_CFG" \
             --storepass NONE \
-            --
+            --alias "$CERT_ALIAS" \
+            "$OUT_DIR/$(basename "$FILE")"
+
+          echo "✅ Signed file(s):"
+          ls -la "$OUT_DIR"
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignedFile-Linux-Agent
+          path: |
+            signed-output/*
