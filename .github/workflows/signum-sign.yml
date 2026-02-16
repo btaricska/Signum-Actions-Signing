@@ -1,29 +1,15 @@
-name: Sign (Linux runner) via Keyfactor Agent + PKCS#11
-
-# Notes:
-# - Installs Keyfactor .deb agent on the runner using systemd (not container-based)
-# - Supports PKCS#11 listing via signum-util, p11tool, or pkcs11-tool
-# - Required secrets: SIGNUM_HOSTNAME, SIGNUM_CLIENTID, SIGNUM_USERNAME,
-#   SIGNUM_PASSWORD, KF_AGENT_DEB_URL
-# - Optional secret: CERT_ALIAS (to pin signing certificate)
+name: Sign (Linux runner) via Keyfactor Agent + PKCS11
 
 on:
   workflow_dispatch:
     inputs:
-      artifact_name:
-        description: "Name of artifact to download containing the file to sign"
-        required: false
-        default: "ExeToSign"
       file_to_sign:
-        description: "Path to file to sign (after artifact download / checkout)"
+        description: "Path to file to sign"
         required: false
         default: "hello-world-app.exe"
-      sign_method:
-        description: "Signing method: jsign (default) or openssl (advanced)"
-        required: false
-        default: "jsign"
   push:
-    branches: ["main"]
+    branches:
+      - "main"
 
 permissions:
   contents: read
@@ -42,6 +28,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      ############################################################
+      # Validate required secrets
+      ############################################################
       - name: Validate secrets
         shell: bash
         env:
@@ -54,53 +43,61 @@ jobs:
           set -euo pipefail
           for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL; do
             if [ -z "${!s:-}" ]; then
-              echo "❌ Missing secret: $s"
+              echo "Missing secret: $s"
               exit 1
             fi
           done
-          echo "✅ Secrets validated"
+          echo "All required secrets are present."
 
-      - name: Download optional artifact
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_name != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ inputs.artifact_name }}
-          path: .
-
-      - name: Install prerequisites (OpenSC, Java, PKCS#11 tools)
+      ############################################################
+      # Install system dependencies (Ubuntu 22.04 safe)
+      ############################################################
+      - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
-            p11-kit-tools p11-kit \
-            default-jre-headless curl ca-certificates gnupg
+            opensc \
+            opensc-pkcs11 \
+            pcscd \
+            libpcsclite1 \
+            libccid \
+            p11-kit \
+            gnutls-bin \
+            default-jre-headless \
+            curl \
+            ca-certificates
 
-      - name: Install jsign (optional for Authenticode)
+      ############################################################
+      # Install jsign
+      ############################################################
+      - name: Install jsign
         shell: bash
         run: |
           set -euo pipefail
           curl -fsSL -o jsign.deb "$JSIGN_DEB_URL"
-          sudo dpkg -i jsign.deb || sudo apt-get install -f -y && sudo dpkg -i jsign.deb
+          sudo dpkg -i jsign.deb || sudo apt-get -f install -y
 
-      - name: Install Keyfactor Agent and enable service
+      ############################################################
+      # Install Keyfactor Agent
+      ############################################################
+      - name: Install Keyfactor Agent
         shell: bash
         env:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
-          echo "Downloading Keyfactor agent .deb..."
           curl -fsSL -o kf-agent.deb "$KF_AGENT_DEB_URL"
-          echo "Installing Keyfactor agent..."
-          sudo dpkg -i kf-agent.deb || sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb
-          echo "Enabling & starting KeyfactorService..."
+          sudo dpkg -i kf-agent.deb || sudo apt-get -f install -y
+
           sudo systemctl daemon-reload || true
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
-          echo "Service status (last 200 lines):"
-          sudo journalctl -u KeyfactorService -n 200 --no-pager || true
 
+      ############################################################
+      # Configure Keyfactor Agent
+      ############################################################
       - name: Configure Keyfactor Agent
         shell: bash
         env:
@@ -110,46 +107,40 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           set -euo pipefail
-          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null
+
+          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" > /dev/null
+
           sudo keyfactor-setup \
             hostname="$SIGNUM_HOSTNAME" \
             clientid="$SIGNUM_CLIENTID" \
             username="$SIGNUM_USERNAME" \
-            password="$SIGNUM_PASSWORD" \
-            loglevel=HIGH logtype=FILE
-          sudo systemctl restart KeyfactorService
-          echo "KeyfactorService restarted. Listening ports:"
-          ss -ltnp || true
+            password="$SIGNUM_PASSWORD"
 
-      - name: Locate Keyfactor PKCS#11 module
+          sudo systemctl restart KeyfactorService
+
+      ############################################################
+      # Locate PKCS11 module
+      ############################################################
+      - name: Locate PKCS11 module
         id: find_module
         shell: bash
         run: |
           set -euo pipefail
-          CANDIDATES=(
-            /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so
-            /usr/lib/libkeyfactorpkcs11.so
-            /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so
-            /usr/lib64/libkeyfactorpkcs11.so
-          )
-          FOUND=""
-          for p in "${CANDIDATES[@]}"; do
-            if [ -f "$p" ]; then
-              FOUND="$p"
-              break
-            fi
-          done
-          if [ -z "$FOUND" ]; then
-            FOUND="$(sudo find / -type f -name 'libkeyfactorpkcs11.so' 2>/dev/null | head -n 1 || true)"
-          fi
-          if [ -z "$FOUND" ]; then
-            echo "❌ Could not locate libkeyfactorpkcs11.so"
+
+          MODULE_PATH=$(sudo find / -type f -name "libkeyfactorpkcs11.so" 2>/dev/null | head -n 1 || true)
+
+          if [ -z "$MODULE_PATH" ]; then
+            echo "PKCS11 module not found."
             exit 1
           fi
-          echo "✅ Found PKCS#11 module at: $FOUND"
-          echo "module=$FOUND" >> $GITHUB_OUTPUT
 
-      - name: Write SunPKCS11 provider config
+          echo "Found module at $MODULE_PATH"
+          echo "module=$MODULE_PATH" >> $GITHUB_OUTPUT
+
+      ############################################################
+      # Write SunPKCS11 config
+      ############################################################
+      - name: Create PKCS11 provider config
         shell: bash
         run: |
           set -euo pipefail
@@ -157,56 +148,63 @@ jobs:
           name=Keyfactor
           library=${{ steps.find_module.outputs.module }}
           EOF
-          echo "✅ Wrote $PKCS11_PROVIDER_CFG"
 
-      - name: Determine certificate alias
+      ############################################################
+      # Determine certificate alias
+      ############################################################
+      - name: Select certificate alias
         id: choose_cert
         shell: bash
-        env:
-          CERT_ALIAS: ${{ secrets.CERT_ALIAS || '' }}
         run: |
           set -euo pipefail
-          if [ -n "${CERT_ALIAS}" ]; then
-            echo "Using CERT_ALIAS from secrets: $CERT_ALIAS"
-            echo "alias=$CERT_ALIAS" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          FIRST_ID=$(keytool -list -storetype PKCS11 \
-            -providerClass sun.security.pkcs11.SunPKCS11 \
-            -providerArg "$PKCS11_PROVIDER_CFG" -storepass NONE 2>/dev/null \
-            | grep -oP '^[0-9A-F]+' | head -n1 || true)
-          if [ -n "$FIRST_ID" ]; then
-            echo "Auto-selected alias: $FIRST_ID"
-            echo "alias=$FIRST_ID" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          echo "❌ Could not determine certificate alias. Provide CERT_ALIAS secret."
-          exit 1
 
+          FIRST_ID=$(keytool -list \
+            -storetype PKCS11 \
+            -providerClass sun.security.pkcs11.SunPKCS11 \
+            -providerArg "$PKCS11_PROVIDER_CFG" \
+            -storepass NONE 2>/dev/null \
+            | grep -oE '^[0-9A-F]+' | head -n1 || true)
+
+          if [ -z "$FIRST_ID" ]; then
+            echo "No certificate found in PKCS11 store."
+            exit 1
+          fi
+
+          echo "Selected alias: $FIRST_ID"
+          echo "alias=$FIRST_ID" >> $GITHUB_OUTPUT
+
+      ############################################################
+      # Sign file
+      ############################################################
       - name: Sign file with jsign
-        if: ${{ inputs.sign_method == 'jsign' }}
         shell: bash
         run: |
           set -euo pipefail
+
           FILE="${{ inputs.file_to_sign }}"
+          if [ ! -f "$FILE" ]; then
+            echo "File not found: $FILE"
+            exit 1
+          fi
+
           mkdir -p "$OUT_DIR"
-          cp -f "$FILE" "$OUT_DIR/"
-          jsign --storetype PKCS11 \
-                --keystore "$PKCS11_PROVIDER_CFG" \
-                --storepass NONE \
-                --alias "${{ steps.choose_cert.outputs.alias }}" \
-                "$OUT_DIR/$(basename "$FILE")"
-          echo "✅ Signed file:"
+          cp "$FILE" "$OUT_DIR/"
+
+          jsign \
+            --storetype PKCS11 \
+            --keystore "$PKCS11_PROVIDER_CFG" \
+            --storepass NONE \
+            --alias "${{ steps.choose_cert.outputs.alias }}" \
+            "$OUT_DIR/$(basename "$FILE")"
+
+          echo "Signing completed."
           ls -la "$OUT_DIR"
 
+      ############################################################
+      # Upload artifact
+      ############################################################
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SignedFile-Linux-Agent
+          name: signed-file
           path: signed-output/*
-
-      - name: Final status
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Workflow finished. Inspect earlier logs if signing failed."
