@@ -1,281 +1,90 @@
-name: Sign File via Signum Agent + PKCS11
-
-on:
-  workflow_dispatch:
-  push:
-    branches: ["main"]
-
-permissions:
-  contents: read
-
-jobs:
-  sign:
-    runs-on: ubuntu-22.04
-
-    env:
-      JSIGN_DEB_URL: "https://github.com/ebourg/jsign/releases/download/6.0/jsign_6.0_all.deb"
-      KF_CFG_PATH: "/etc/keyfactor/config"
-      PKCS11_PROVIDER_CFG: "keyfactorpkcs11.cfg"
-      OUT_DIR: "signed-output"
-
-      # Pick the cert by subject fragment (your desired cert)
-      EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Validate required secrets
-        shell: bash
-        env:
-          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
-        run: |
-          set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL; do
-            if [ -z "${!s:-}" ]; then
-              echo "❌ Missing secret: $s"
-              exit 1
-            fi
-          done
-          echo "✅ Secrets validated"
-
-      - name: Install prerequisites (OpenSC, p11tool, Java, mingw, curl)
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
-            p11-kit gnutls-bin \
-            default-jre-headless \
-            mingw-w64 \
-            curl ca-certificates
-
-          echo "✅ Versions:"
-          command -v pkcs11-tool && pkcs11-tool --version || true
-          command -v p11tool && p11tool --version || true
-
-      - name: Create a random EXE to sign (Windows PE)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > hello.c <<'EOF'
-          #include <windows.h>
-          #include <stdio.h>
-          int main() { printf("Hello from Signum signing demo!\n"); return 0; }
-          EOF
-          x86_64-w64-mingw32-gcc -O2 -s -o hello-world-app.exe hello.c
-          echo "✅ Created hello-world-app.exe"
-          file hello-world-app.exe
-          ls -la hello-world-app.exe
-
-      - name: Install jsign (.deb)
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL -o jsign.deb "$JSIGN_DEB_URL"
-          sudo dpkg -i jsign.deb || (sudo apt-get install -f -y && sudo dpkg -i jsign.deb)
-          jsign --version || true
-
-      - name: Install Keyfactor Agent (.deb)
-        shell: bash
-        env:
-          KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
-        run: |
-          set -euo pipefail
-
-          AGENT_URL="$(printf "%s" "${KF_AGENT_DEB_URL:-}" | tr -d '\r' | xargs)"
-          if [ -z "${AGENT_URL:-}" ]; then
-            echo "❌ KF_AGENT_DEB_URL is empty"
-            exit 1
-          fi
-          if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
-            echo "❌ KF_AGENT_DEB_URL must be ONLY the URL (one line, no quotes)."
-            exit 1
-          fi
-
-          echo "⬇️ Downloading Keyfactor agent..."
-          curl -fsSL -o kf-agent.deb "$AGENT_URL"
-
-          echo "📦 Installing Keyfactor agent..."
-          sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
-
-          echo "✅ Installed packages:"
-          dpkg -l | grep -i keyfactor || true
-
-      - name: Configure agent (keyfactor-setup) + restart service
-        shell: bash
-        env:
-          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null || true
-
-          sudo keyfactor-setup \
-            hostname="$SIGNUM_HOSTNAME" \
-            clientid="$SIGNUM_CLIENTID" \
-            username="$SIGNUM_USERNAME" \
-            password="$SIGNUM_PASSWORD" \
-            loglevel=HIGH logtype=FILE
-
-          sudo systemctl daemon-reload || true
-          sudo systemctl enable KeyfactorService || true
-          sudo systemctl restart KeyfactorService
-
-      - name: Wait for KeyfactorService
-        shell: bash
-        run: |
-          set -euo pipefail
-          for i in {1..60}; do
-            if systemctl is-active --quiet KeyfactorService; then
-              echo "✅ KeyfactorService is active"
-              break
-            fi
-            sleep 1
-          done
-
-          if ! systemctl is-active --quiet KeyfactorService; then
-            echo "❌ KeyfactorService not active"
-            sudo systemctl status KeyfactorService --no-pager || true
-            sudo journalctl -u KeyfactorService -n 200 --no-pager || true
-            exit 1
-          fi
-
-          sudo journalctl -u KeyfactorService -n 120 --no-pager || true
-          ss -ltnp || true
-
-      - name: Resolve PKCS#11 module path (prefer /etc/keyfactor/keyfactor.module)
-        id: pkcs11
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FOUND=""
-
-          if [ -f /etc/keyfactor/keyfactor.module ]; then
-            FOUND="$(awk -F'"' '/module:/ {print $2; exit}' /etc/keyfactor/keyfactor.module || true)"
-          fi
-
-          if [ -z "${FOUND:-}" ]; then
-            for p in \
-              /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so \
-              /usr/lib/libkeyfactorpkcs11.so \
-              /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so \
-              /usr/lib64/libkeyfactorpkcs11.so; do
-              if [ -f "$p" ]; then FOUND="$p"; break; fi
-            done
-          fi
-
-          if [ -z "${FOUND:-}" ]; then
-            FOUND="$(sudo find / -type f -name 'libkeyfactorpkcs11.so' 2>/dev/null | head -n 1 || true)"
-          fi
-
-          if [ -z "${FOUND:-}" ]; then
-            echo "❌ libkeyfactorpkcs11.so not found"
-            exit 1
-          fi
-
-          echo "✅ PKCS#11 module: $FOUND"
-          ls -la "$FOUND" || true
-          ldd "$FOUND" || true
-
-          echo "module=$FOUND" >> "$GITHUB_OUTPUT"
-
-      - name: Write SunPKCS11 config (minimal)
+      - name: List ALL tokens, certs, and keys (PKCS#11 inventory)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-        run: |
-          set -euo pipefail
-          cat > "$PKCS11_PROVIDER_CFG" <<EOF
-          name=KeyfactorPKCS11
-          library=${MODULE_PATH}
-          EOF
-          cat "$PKCS11_PROVIDER_CFG"
-
-      - name: Token inventory (p11tool; non-fatal)
-        shell: bash
-        env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-        run: |
-          set -euo pipefail
-          echo "=== p11tool --list-tokens (non-fatal) ==="
-          p11tool --list-tokens --provider "$MODULE_PATH" || true
-
-      - name: Choose certificate by subject (pkcs11-tool; required)
-        id: cert
-        shell: bash
-        env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-          EXPECTED_SUBJECT_FRAGMENT: ${{ env.EXPECTED_SUBJECT_FRAGMENT }}
+          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
-          echo "🔎 Looking for cert with subject containing: $EXPECTED_SUBJECT_FRAGMENT"
+          echo "========================================"
+          echo "PKCS#11 MODULE"
+          echo "  $MODULE_PATH"
+          echo "========================================"
+          ls -la "$MODULE_PATH" || true
+          ldd "$MODULE_PATH" || true
+          echo
 
-          OUT="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>&1)"
-          echo "$OUT"
+          echo "========================================"
+          echo "TOKENS (p11tool - preferred on 22.04+)"
+          echo "========================================"
+          if command -v p11tool >/dev/null 2>&1; then
+            p11tool --list-tokens --provider "$MODULE_PATH" || true
+          else
+            echo "p11tool not found"
+          fi
+          echo
 
-          MATCH_BLOCK="$(printf "%s\n" "$OUT" | awk '
-            BEGIN{RS="Certificate Object"; ORS=""}
-            NR>1{
-              block="Certificate Object"$0
-              if (block ~ /subject:/ && block ~ ENVIRON["EXPECTED_SUBJECT_FRAGMENT"]) { print block; exit }
-            }')"
+          echo "========================================"
+          echo "SLOTS (pkcs11-tool)"
+          echo "========================================"
+          pkcs11-tool --module "$MODULE_PATH" --list-slots --verbose || true
+          echo
 
-          if [ -z "${MATCH_BLOCK:-}" ]; then
-            echo "❌ No certificate matched subject fragment: $EXPECTED_SUBJECT_FRAGMENT"
-            echo "➡️ This likely means the CodeSigningCertificate cert/private key is not provisioned to this agent via PKCS#11."
-            exit 1
+          # Choose first available slot number if we can
+          SLOT="$(pkcs11-tool --module "$MODULE_PATH" --list-slots 2>/dev/null \
+            | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}' || true)"
+
+          if [ -z "${SLOT:-}" ]; then
+            echo "⚠️ Could not parse a slot number; will run listings without --slot."
+          else
+            echo "✅ Using slot: $SLOT"
+          fi
+          echo
+
+          echo "========================================"
+          echo "CERTIFICATES"
+          echo "========================================"
+          if [ -n "${SLOT:-}" ]; then
+            CERTS="$(pkcs11-tool --module "$MODULE_PATH" --slot "$SLOT" --list-objects --type cert 2>&1 || true)"
+          else
+            CERTS="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>&1 || true)"
+          fi
+          echo "$CERTS"
+          echo
+
+          echo "---- Parsed certificate summary (Label / Subject / ID) ----"
+          # Prints a clean summary per certificate object
+          echo "$CERTS" | awk '
+            BEGIN{label=""; subj=""; id=""}
+            /^Certificate Object/ { if (label||subj||id){print "Label: "label"\nSubject: "subj"\nID: "id"\n---"}; label="";subj="";id=""; next}
+            /^[[:space:]]*label:/   {sub(/^[[:space:]]*label:[[:space:]]*/,""); label=$0; next}
+            /^[[:space:]]*subject:/ {sub(/^[[:space:]]*subject:[[:space:]]*/,""); subj=$0; next}
+            /^[[:space:]]*ID:/      {sub(/^[[:space:]]*ID:[[:space:]]*/,""); id=$0; next}
+            END{ if (label||subj||id){print "Label: "label"\nSubject: "subj"\nID: "id"\n---"} }
+          ' | sed -n '1,300p'
+          echo
+
+          echo "========================================"
+          echo "PUBLIC KEYS"
+          echo "========================================"
+          if [ -n "${SLOT:-}" ]; then
+            pkcs11-tool --module "$MODULE_PATH" --slot "$SLOT" --list-objects --type pubkey --verbose || true
+          else
+            pkcs11-tool --module "$MODULE_PATH" --list-objects --type pubkey --verbose || true
+          fi
+          echo
+
+          echo "========================================"
+          echo "PRIVATE KEYS (requires login)"
+          echo "========================================"
+          if [ -z "${USER_PIN:-}" ]; then
+            echo "⚠️ USER_PIN secret not set; skipping private key listing."
+            exit 0
           fi
 
-          ID="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r" | tr '[:lower:]' '[:upper:]')"
-          LABEL="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *label:/ {print $2; exit}' | tr -d "\r")"
-          SUBJECT="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *subject:/ {print $2; exit}' | tr -d "\r")"
-
-          echo "✅ Selected certificate:"
-          echo "   Subject: $SUBJECT"
-          echo "   Label:   ${LABEL:-<none>}"
-          echo "   ID:      ${ID:-<none>}"
-
-          if [ -z "${ID:-}" ]; then
-            echo "❌ Matched cert but could not extract ID"
-            exit 1
+          # Private keys require login
+          if [ -n "${SLOT:-}" ]; then
+            pkcs11-tool --module "$MODULE_PATH" --slot "$SLOT" --login --pin "$USER_PIN" --list-objects --type privkey --verbose || true
+          else
+            pkcs11-tool --module "$MODULE_PATH" --login --pin "$USER_PIN" --list-objects --type privkey --verbose || true
           fi
-
-          echo "alias=$ID" >> "$GITHUB_OUTPUT"
-
-      - name: Sign with jsign using selected certificate
-        shell: bash
-        env:
-          CERT_ALIAS: ${{ steps.cert.outputs.alias }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$OUT_DIR"
-          cp -f hello-world-app.exe "$OUT_DIR/"
-
-          echo "✍️ Signing with alias: $CERT_ALIAS"
-          jsign \
-            --storetype PKCS11 \
-            --keystore "$PKCS11_PROVIDER_CFG" \
-            --storepass NONE \
-            --alias "$CERT_ALIAS" \
-            "$OUT_DIR/hello-world-app.exe"
-
-          echo "✅ Output:"
-          ls -la "$OUT_DIR"
-
-      - name: Upload signed artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SignedFile-Linux-Agent
-          path: signed-output/*
