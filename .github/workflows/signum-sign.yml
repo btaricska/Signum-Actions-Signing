@@ -1,7 +1,35 @@
-name: Sign File via Signum Agent + PKCS11
+name: Sign (Linux runner) via Keyfactor Agent + PKCS#11
 
+# copy/paste this file into .github/workflows/sign-with-keyfactor.yml
+# Notes:
+# - This workflow follows the *working* pattern: install the Keyfactor .deb on the runner
+#   (systemd service) rather than relying on a container that may not run systemd.
+# - It includes robust PKCS#11 listing logic to support both older (pkcs11-tool)
+#   and newer (p11tool) approaches on Ubuntu 22.04+ and also checks for signum-util.
+# - You must provide a secret KF_AGENT_DEB_URL containing the exact .deb download URL
+#   that works in your environment (the working run's URL).
+#
+# Required GitHub secrets:
+#   SIGNUM_HOSTNAME, SIGNUM_CLIENTID, SIGNUM_USERNAME, SIGNUM_PASSWORD
+#   KF_AGENT_DEB_URL
+# Optional:
+#   CERT_ALIAS  (if you want to pin the certificate ID/alias used for signing)
+#
 on:
   workflow_dispatch:
+    inputs:
+      artifact_name:
+        description: "Optional: name of artifact to download that contains the file to sign"
+        required: false
+        default: "ExeToSign"
+      file_to_sign:
+        description: "Path to file to sign (after artifact download / checkout)"
+        required: false
+        default: "hello-world-app.exe"
+      sign_method:
+        description: "Signing method: jsign (default) or openssl (advanced)"
+        required: false
+        default: "jsign"
   push:
     branches: ["main"]
 
@@ -10,19 +38,13 @@ permissions:
 
 jobs:
   sign:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     env:
-      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
-      FILES_DIR: filestosign
-      CONTAINER_NAME: signum-agent
-      DOCKER_CONFIG: ${{ github.workspace }}/.docker
-
-      # PKCS#11 module path inside container
-      PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
-
-      # Optional: expected subject fragment to help humans confirm the right cert is present
-      EXPECTED_CERT_SUBJECT: "CN=CodeSigningCertificate"
+      JSIGN_DEB_URL: "https://github.com/ebourg/jsign/releases/download/6.0/jsign_6.0_all.deb"
+      KF_CFG_PATH: "/etc/keyfactor/config"
+      PKCS11_PROVIDER_CFG: "keyfactorpkcs11.cfg"
+      OUT_DIR: "signed-output"
 
     steps:
       - name: Checkout repository
@@ -35,37 +57,63 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-          USER_PIN: ${{ secrets.USER_PIN }}
+          KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
             fi
           done
           echo "✅ Secrets validated"
-          echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
-      - name: Configure Docker auth
+      - name: (Optional) Download artifact that contains file to sign
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_name != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .
+
+      - name: Install prerequisites (OpenSC, Java, p11 tools)
         shell: bash
-        env:
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
-          mkdir -p "$DOCKER_CONFIG"
-          cat > "$DOCKER_CONFIG/config.json" <<EOF
-          {
-            "auths": {
-              "keyfactor.jfrog.io": {
-                "auth": "${JFROG_DOCKER_AUTH}"
-              }
-            }
-          }
-          EOF
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
+            p11-kit-tools p11-kit \
+            default-jre-headless curl ca-certificates gnupg
 
-      - name: Start Signum Agent container
+      - name: Install jsign (for Authenticode via Java) - optional but default
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o jsign.deb "$JSIGN_DEB_URL"
+          sudo dpkg -i jsign.deb || sudo apt-get install -f -y && sudo dpkg -i jsign.deb
+
+      - name: Install Keyfactor Agent (.deb) and enable service
+        shell: bash
+        env:
+          KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
+        run: |
+          set -euo pipefail
+
+          echo "Downloading Keyfactor agent .deb from KF_AGENT_DEB_URL..."
+          curl -fsSL -o kf-agent.deb "$KF_AGENT_DEB_URL"
+
+          echo "Installing Keyfactor agent..."
+          sudo dpkg -i kf-agent.deb || sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb
+
+          echo "Enabling & starting KeyfactorService..."
+          sudo systemctl daemon-reload || true
+          sudo systemctl enable KeyfactorService || true
+          sudo systemctl restart KeyfactorService
+
+          echo "Service status (last 200 lines):"
+          sudo journalctl -u KeyfactorService -n 200 --no-pager || true
+
+      - name: Configure agent (keyfactor-setup)
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -74,169 +122,232 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           set -euo pipefail
+          # set logging (optional)
+          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null || true
 
-          mkdir -p "$FILES_DIR"
-          docker pull "$SIGNUM_AGENT_IMAGE"
-          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+          sudo keyfactor-setup \
+            hostname="$SIGNUM_HOSTNAME" \
+            clientid="$SIGNUM_CLIENTID" \
+            username="$SIGNUM_USERNAME" \
+            password="$SIGNUM_PASSWORD" \
+            loglevel=HIGH logtype=FILE
 
-          docker run -d \
-            --name "$CONTAINER_NAME" \
-            -e SIGNUM_HOSTNAME \
-            -e SIGNUM_CLIENTID \
-            -e SIGNUM_USERNAME \
-            -e SIGNUM_PASSWORD \
-            -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
-            "$SIGNUM_AGENT_IMAGE"
+          sudo systemctl restart KeyfactorService
+          echo "KeyfactorService restarted. Listening ports:"
+          ss -ltnp || true
 
-          echo "⏳ Waiting for PKCS#11 module to become ready..."
-          for i in {1..120}; do
-            if docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots >/dev/null 2>&1; then
-              echo "✅ PKCS#11 module is ready"
-              exit 0
+      - name: Locate Keyfactor PKCS#11 module
+        id: find_module
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Common places to check; on .deb install often installed under /usr/local/keyfactor or /usr/lib
+          CANDIDATES=(
+            /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so
+            /usr/lib/libkeyfactorpkcs11.so
+            /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so
+            /usr/lib64/libkeyfactorpkcs11.so
+          )
+
+          FOUND=""
+          for p in "${CANDIDATES[@]}"; do
+            if [ -f "$p" ]; then
+              FOUND="$p"
+              break
             fi
-            sleep 1
           done
 
-          echo "❌ PKCS#11 module never became ready"
-          echo "---- docker logs (tail) ----"
-          docker logs "$CONTAINER_NAME" | tail -n 300 || true
-          echo "---- pkcs11-tool verbose ----"
-          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose || true
-          exit 1
+          if [ -z "$FOUND" ]; then
+            echo "🔎 Searching filesystem for libkeyfactorpkcs11.so (this may take a second)..."
+            FOUND="$(sudo find / -type f -name 'libkeyfactorpkcs11.so' 2>/dev/null | head -n 1 || true)"
+          fi
 
-      - name: Create JSON file to sign
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$FILES_DIR"
-          echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
-          echo "✅ JSON file created at $FILES_DIR/file.json"
+          if [ -z "$FOUND" ]; then
+            echo "❌ Could not locate libkeyfactorpkcs11.so on this runner."
+            echo "➡️ Check your agent install or provide correct .deb URL."
+            exit 1
+          fi
 
-      - name: PKCS#11 inventory + sign JSON
+          echo "✅ Found PKCS#11 module at: $FOUND"
+          echo "::set-output name=module::$FOUND"
+
+      - name: Write SunPKCS11 provider config for Java tools
         shell: bash
         env:
-          USER_PIN: ${{ secrets.USER_PIN }}
+          MODULE_PATH: ${{ steps.find_module.outputs.module }}
+        run: |
+          set -euo pipefail
+          cat > "$PKCS11_PROVIDER_CFG" <<EOF
+          name=Keyfactor
+          library=${MODULE_PATH}
+          EOF
+          echo "✅ Wrote $PKCS11_PROVIDER_CFG"
+          cat "$PKCS11_PROVIDER_CFG"
+
+      - name: List available certs/tokens (tries signum-util -> p11tool -> pkcs11-tool)
+        id: list_certs
+        shell: bash
+        env:
+          MODULE_PATH: ${{ steps.find_module.outputs.module }}
         run: |
           set -euo pipefail
 
-          CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
-          CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
+          echo "1) check for signum-util..."
+          if command -v signum-util >/dev/null 2>&1; then
+            echo "signum-util found; using --listcertificates"
+            signum-util --listcertificates || true
+            echo "::set-output name=method::signum-util"
+            exit 0
+          fi
 
-          echo "✅ Verifying input file exists inside the container..."
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
+          echo "2) try p11tool (preferred on Ubuntu 22.04+)..."
+          if command -v p11tool >/dev/null 2>&1; then
+            echo "p11tool available; listing tokens via provider ${MODULE_PATH}..."
+            # p11tool shows token names; we capture output for reference
+            p11tool --list-tokens --provider "${MODULE_PATH}" 2>/dev/null | sed -n '1,200p' || true
+            echo "::set-output name=method::p11tool"
+            exit 0
+          fi
 
-          echo "🔍 Listing slots (verbose)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose
+          echo "3) fallback to pkcs11-tool (older style)..."
+          if command -v pkcs11-tool >/dev/null 2>&1; then
+            echo "pkcs11-tool available; listing objects..."
+            pkcs11-tool --module "${MODULE_PATH}" --list-slots --verbose 2>/dev/null || true
+            pkcs11-tool --module "${MODULE_PATH}" -O 2>/dev/null || true
+            echo "::set-output name=method::pkcs11-tool"
+            exit 0
+          fi
 
-          SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
-            | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
+          echo "❌ None of signum-util / p11tool / pkcs11-tool found. Install opensc or use the .deb agent which provides these."
+          exit 1
 
-          if [ -z "${SLOT:-}" ]; then
-            echo "❌ No slots found"
+      - name: Determine certificate alias (thumbprint/id) for signing
+        id: choose_cert
+        shell: bash
+        env:
+          MODULE_PATH: ${{ steps.find_module.outputs.module }}
+          CERT_ALIAS: ${{ secrets.CERT_ALIAS || '' }}
+        run: |
+          set -euo pipefail
+
+          # If user provided CERT_ALIAS secret, use it
+          if [ -n "${CERT_ALIAS:-}" ]; then
+            echo "Using CERT_ALIAS from secrets: $CERT_ALIAS"
+            echo "::set-output name=alias::$CERT_ALIAS"
+            exit 0
+          fi
+
+          # Prefer Java keytool listing (consistent with the working example)
+          KEYTOOL_OUT="$(keytool -list -storetype PKCS11 -providerClass sun.security.pkcs11.SunPKCS11 -providerArg "$PKCS11_PROVIDER_CFG" -storepass NONE 2>/dev/null || true)"
+
+          # keytool lists lines like: "170570A1D56FBB5A4CC780B69ACAEF94010D5DAA - Certificate"
+          FIRST_ID="$(echo "$KEYTOOL_OUT" | grep -oP '^[0-9A-F]+' | head -n1 || true)"
+
+          if [ -n "$FIRST_ID" ]; then
+            echo "Auto-selected alias (from keytool): $FIRST_ID"
+            echo "::set-output name=alias::$FIRST_ID"
+            exit 0
+          fi
+
+          # Fallback: attempt to parse pkcs11-tool private key block
+          PRIV_OUT="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type privkey --login --pin "${{ secrets.USER_PIN || '' }}" 2>/dev/null || true)"
+          FIRST_ID="$(printf "%s\n" "$PRIV_OUT" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d '\r' || true)"
+
+          if [ -n "$FIRST_ID" ]; then
+            echo "Auto-selected alias (from pkcs11-tool): $FIRST_ID"
+            echo "::set-output name=alias::$FIRST_ID"
+            exit 0
+          fi
+
+          echo "❌ Could not auto-select a certificate alias. Please provide CERT_ALIAS secret or ensure the agent is provisioned with a signing cert."
+          exit 1
+
+      - name: Sign file (jsign) using PKCS#11 alias
+        if: ${{ inputs.sign_method == 'jsign' }}
+        shell: bash
+        env:
+          CERT_ALIAS: ${{ steps.choose_cert.outputs.alias }}
+          MODULE_PATH: ${{ steps.find_module.outputs.module }}
+        run: |
+          set -euo pipefail
+
+          FILE="${{ inputs.file_to_sign || 'hello-world-app.exe' }}"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ File to sign not found: $FILE"
+            ls -la
             exit 1
           fi
-          echo "✅ Using slot: $SLOT"
 
-          echo "🔎 Listing ALL objects in slot $SLOT (no login)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects || true
+          mkdir -p "$OUT_DIR"
+          cp -f "$FILE" "$OUT_DIR/"
 
-          echo "🔍 Listing certificates in slot $SLOT..."
-          CERT_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects --type cert 2>&1 || true)"
-          echo "$CERT_OUT"
+          echo "Creating provider config for jsign/keytool usage..."
+          cat > "$PKCS11_PROVIDER_CFG" <<EOF
+          name=Keyfactor
+          library=${MODULE_PATH}
+          EOF
 
-          if echo "$CERT_OUT" | grep -q "Certificate Object"; then
-            echo "✅ At least one certificate object is visible via PKCS#11"
-            if [ -n "${EXPECTED_CERT_SUBJECT:-}" ]; then
-              echo "ℹ️ If available, confirm expected subject fragment: $EXPECTED_CERT_SUBJECT"
-            fi
+          echo "Running jsign with alias: $CERT_ALIAS"
+          # jsign accepts --storetype PKCS11 with --keystore pointing to a provider config file
+          jsign \
+            --storetype PKCS11 \
+            --keystore "$PKCS11_PROVIDER_CFG" \
+            --storepass NONE \
+            --alias "$CERT_ALIAS" \
+            "$OUT_DIR/$(basename "$FILE")"
+
+          echo "✅ Signed file(s):"
+          ls -la "$OUT_DIR"
+
+      - name: (Optional/Advanced) Sign with OpenSSL (supported usage notes)
+        if: ${{ inputs.sign_method == 'openssl' }}
+        shell: bash
+        env:
+          MODULE_PATH: ${{ steps.find_module.outputs.module }}
+          CERT_ALIAS: ${{ steps.choose_cert.outputs.alias }}
+        run: |
+          set -euo pipefail
+
+          echo "⚠️ OpenSSL signing with PKCS#11 is advanced and depends on available engines/providers."
+          echo "This step demonstrates a common approach but may need adjustment in your environment."
+          FILE="${{ inputs.file_to_sign || 'hello-world-app.exe' }}"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ File to sign not found: $FILE"
+            ls -la
+            exit 1
+          fi
+
+          # Example: list tokens depending on platform (informational)
+          if command -v p11tool >/dev/null 2>&1; then
+            p11tool --list-tokens --provider "$MODULE_PATH" || true
           else
-            echo "⚠️ No certificate objects visible via PKCS#11"
+            pkcs11-tool --module "$MODULE_PATH" --list-slots --verbose || true
           fi
 
-          echo "🔍 Listing public keys in slot $SLOT..."
-          PUB_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects --type pubkey 2>&1 || true)"
-          echo "$PUB_OUT"
+          # Example openssl commands referenced in Keyfactor docs for SignServer/OpenSSL workflows:
+          # NOTE: these are examples. Your environment may require the 'engine' or 'provider' approach,
+          # and you may need to install OpenSC's pkcs11 engine or configure an engine/provider alias.
+          #
+          # 1) Using pkcs11 engine (legacy engines must be present):
+          #    openssl pkeyutl -engine pkcs11 -keyform engine -inkey "pkcs11:object=$CERT_ALIAS" -sign -in file -out file.sig
+          #
+          # 2) Using cms/signing with PKCS#11 engine:
+          #    openssl cms -sign -engine pkcs11 -keyform engine -inkey "pkcs11:object=$CERT_ALIAS" -signer cert.pem -in file -outform DER -out file.sig
+          #
+          # Because engine/provider setups vary greatly, this step does not run an automated openssl sign by default.
+          echo "ℹ️ Please adapt the above openssl examples to your environment if you choose openssl signing."
 
-          echo "🔑 Listing private keys in slot $SLOT (with login)..."
-          PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --login \
-            --pin "$USER_PIN" \
-            --list-objects --type privkey 2>&1 || true)"
-          echo "$PRIV_OUT"
-
-          # Hard fail unless we see an actual Private Key Object
-          if ! echo "$PRIV_OUT" | grep -q "Private Key Object"; then
-            echo "❌ No private key objects visible in slot $SLOT."
-            echo "➡️ The certificate may exist in Signum, but its private key is not provisioned/assigned/exposed to this agent via PKCS#11."
-            echo "➡️ Ensure the CodeSigningCertificate private key is available to this agent/user, then rerun."
-            exit 1
-          fi
-
-          echo "🔍 Selecting first private key block..."
-          KEY_BLOCK="$(printf "%s\n" "$PRIV_OUT" | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
-          if [ -z "${KEY_BLOCK:-}" ]; then
-            echo "❌ Could not parse a private key object block"
-            exit 1
-          fi
-
-          KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
-          KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
-          KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
-
-          echo "✅ Using private key ID: ${KEY_ID:-<none>}  Label: ${KEY_LABEL:-<none>}  Type: ${KEY_TYPE:-<unknown>}"
-
-          MECH="RSA-PKCS"
-          if echo "${KEY_TYPE:-}" | grep -qiE 'EC|ECDSA'; then
-            MECH="ECDSA"
-          fi
-          echo "ℹ️ Using mechanism: $MECH"
-
-          echo "✍️ Signing JSON file..."
-          if [ -n "${KEY_ID:-}" ]; then
-            docker exec "$CONTAINER_NAME" pkcs11-tool \
-              --module "$PKCS11_MODULE" \
-              --slot "$SLOT" \
-              --login \
-              --pin "$USER_PIN" \
-              --id "$KEY_ID" \
-              --mechanism "$MECH" \
-              --sign \
-              --input-file "$CONTAINER_FILE" \
-              --output-file "$CONTAINER_SIG"
-          elif [ -n "${KEY_LABEL:-}" ]; then
-            docker exec "$CONTAINER_NAME" pkcs11-tool \
-              --module "$PKCS11_MODULE" \
-              --slot "$SLOT" \
-              --login \
-              --pin "$USER_PIN" \
-              --label "$KEY_LABEL" \
-              --mechanism "$MECH" \
-              --sign \
-              --input-file "$CONTAINER_FILE" \
-              --output-file "$CONTAINER_SIG"
-          else
-            echo "❌ First private key block has neither ID nor Label; cannot select it for signing"
-            exit 1
-          fi
-
-          echo "✅ Signature written to $FILES_DIR/file.json.sig"
-          ls -la "$FILES_DIR"
-
-      - name: Upload signature artifact
+      - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: signed-json-and-sig
+          name: SignedFile-Linux-Agent
           path: |
-            filestosign/file.json
-            filestosign/file.json.sig
+            signed-output/*
+
+      - name: Final status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Workflow finished. If signing failed, inspect the earlier logs (keyfactor service, pkcs11 listing, keytool output)."
+          echo "If you want the container approach instead of .deb install: know that many images don't run systemd and the agent will not start inside them. Using the .deb on the runner is the reliable approach."
