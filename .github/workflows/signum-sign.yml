@@ -30,10 +30,9 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
-          CERT_ALIAS: ${{ secrets.CERT_ALIAS }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL CERT_ALIAS; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -41,19 +40,17 @@ jobs:
           done
           echo "✅ Secrets validated"
 
-      - name: Install prerequisites (p11tool, Java, mingw, curl)
+      - name: Install prerequisites
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
             p11-kit gnutls-bin \
             default-jre-headless \
             mingw-w64 \
             curl ca-certificates
-
-          echo "✅ Versions:"
-          command -v p11tool && p11tool --version || true
 
       - name: Create a random EXE to sign (Windows PE)
         shell: bash
@@ -83,17 +80,12 @@ jobs:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
-
           AGENT_URL="$(printf "%s" "${KF_AGENT_DEB_URL:-}" | tr -d '\r' | xargs)"
-          if [ -z "${AGENT_URL:-}" ]; then
-            echo "❌ KF_AGENT_DEB_URL is empty"
-            exit 1
-          fi
+          if [ -z "${AGENT_URL:-}" ]; then echo "❌ KF_AGENT_DEB_URL is empty"; exit 1; fi
           if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
             echo "❌ KF_AGENT_DEB_URL must be ONLY the URL (one line, no quotes)."
             exit 1
           fi
-
           curl -fsSL -o kf-agent.deb "$AGENT_URL"
           sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
 
@@ -106,7 +98,6 @@ jobs:
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           set -euo pipefail
-
           echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null || true
 
           sudo keyfactor-setup \
@@ -120,11 +111,10 @@ jobs:
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
 
-      - name: Wait for KeyfactorService + show logs
+      - name: Wait for KeyfactorService + logs
         shell: bash
         run: |
           set -euo pipefail
-
           for i in {1..60}; do
             if systemctl is-active --quiet KeyfactorService; then
               echo "✅ KeyfactorService is active"
@@ -132,22 +122,19 @@ jobs:
             fi
             sleep 1
           done
-
           if ! systemctl is-active --quiet KeyfactorService; then
             echo "❌ KeyfactorService not active"
             sudo systemctl status KeyfactorService --no-pager || true
             sudo journalctl -u KeyfactorService -n 200 --no-pager || true
             exit 1
           fi
+          sudo journalctl -u KeyfactorService -n 80 --no-pager || true
 
-          sudo journalctl -u KeyfactorService -n 120 --no-pager || true
-
-      - name: Resolve PKCS#11 module path (prefer /etc/keyfactor/keyfactor.module)
+      - name: Resolve PKCS#11 module path
         id: pkcs11
         shell: bash
         run: |
           set -euo pipefail
-
           FOUND=""
 
           if [ -f /etc/keyfactor/keyfactor.module ]; then
@@ -176,16 +163,7 @@ jobs:
           echo "✅ PKCS#11 module: $FOUND"
           echo "module=$FOUND" >> "$GITHUB_OUTPUT"
 
-      - name: Confirm provider initializes (p11tool)
-        shell: bash
-        env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-        run: |
-          set -euo pipefail
-          echo "🔎 p11tool --list-tokens --provider $MODULE_PATH"
-          p11tool --list-tokens --provider "$MODULE_PATH"
-
-      - name: Write SunPKCS11 config (for jsign)
+      - name: Write SunPKCS11 config for Java (jsign/keytool)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
@@ -197,16 +175,67 @@ jobs:
           EOF
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: Sign with jsign using CERT_ALIAS secret
+      - name: Auto-select certificate alias (keytool first, pkcs11-tool fallback)
+        id: alias
         shell: bash
         env:
-          CERT_ALIAS: ${{ secrets.CERT_ALIAS }}
+          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
+        run: |
+          set -euo pipefail
+
+          echo "=== Provider sanity check (p11tool) ==="
+          p11tool --list-tokens --provider "$MODULE_PATH" || true
+
+          echo "=== keytool list (primary) ==="
+          OUT="$(keytool -list \
+            -storetype PKCS11 \
+            -providerClass sun.security.pkcs11.SunPKCS11 \
+            -providerArg "$PKCS11_PROVIDER_CFG" \
+            -storepass NONE 2>&1 || true)"
+          echo "$OUT"
+
+          # Typical lines: "ABCDEF... - Certificate"
+          ALIAS="$(echo "$OUT" | grep -oP '^[0-9A-F]+' | head -n 1 || true)"
+
+          if [ -n "${ALIAS:-}" ]; then
+            echo "✅ Selected alias from keytool: $ALIAS"
+            echo "alias=$ALIAS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "⚠️ keytool did not return any aliases. Trying pkcs11-tool fallback..."
+
+          set +e
+          CERTS="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>&1)"
+          RC=$?
+          set -e
+          echo "$CERTS"
+
+          if [ "$RC" -ne 0 ]; then
+            echo "❌ Could not auto-select alias (keytool empty; pkcs11-tool failed)."
+            echo "➡️ At this point, enumeration is failing in this runner environment."
+            exit 1
+          fi
+
+          ID="$(echo "$CERTS" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r" | tr '[:lower:]' '[:upper:]')"
+          if [ -z "${ID:-}" ]; then
+            echo "❌ pkcs11-tool worked but no ID found to use as alias."
+            exit 1
+          fi
+
+          echo "✅ Selected alias from pkcs11-tool ID: $ID"
+          echo "alias=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Sign with jsign (auto-selected alias)
+        shell: bash
+        env:
+          CERT_ALIAS: ${{ steps.alias.outputs.alias }}
         run: |
           set -euo pipefail
           mkdir -p "$OUT_DIR"
           cp -f hello-world-app.exe "$OUT_DIR/"
 
-          echo "✍️ Signing with alias (CERT_ALIAS): $CERT_ALIAS"
+          echo "✍️ Signing with alias: $CERT_ALIAS"
           jsign \
             --storetype PKCS11 \
             --keystore "$PKCS11_PROVIDER_CFG" \
