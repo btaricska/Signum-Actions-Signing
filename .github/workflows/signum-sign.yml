@@ -18,6 +18,9 @@ jobs:
       PKCS11_PROVIDER_CFG: "keyfactorpkcs11.cfg"
       OUT_DIR: "signed-output"
 
+      # Pick the cert by subject fragment (your desired cert)
+      EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -92,7 +95,6 @@ jobs:
           fi
           if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
             echo "❌ KF_AGENT_DEB_URL must be ONLY the URL (one line, no quotes)."
-            echo "ℹ️ Length: ${#AGENT_URL}"
             exit 1
           fi
 
@@ -128,15 +130,10 @@ jobs:
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
 
-          echo "✅ Service status:"
-          sudo systemctl status KeyfactorService --no-pager || true
-
-      - name: Wait for KeyfactorService to be ready + show diagnostics
+      - name: Wait for KeyfactorService
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "⏳ Waiting for KeyfactorService..."
           for i in {1..60}; do
             if systemctl is-active --quiet KeyfactorService; then
               echo "✅ KeyfactorService is active"
@@ -152,25 +149,8 @@ jobs:
             exit 1
           fi
 
-          echo "✅ Listening ports:"
-          ss -ltnp || true
-
-          echo "✅ /etc/keyfactor:"
-          sudo ls -la /etc/keyfactor || true
-
-          echo "✅ Redacted /etc/keyfactor/config:"
-          if [ -f /etc/keyfactor/config ]; then
-            sudo sed -E 's/(password|clientid|username|hostname)=.*/\1=***REDACTED***/Ig' /etc/keyfactor/config || true
-          else
-            echo "⚠️ /etc/keyfactor/config missing"
-          fi
-
-          echo "✅ keyfactor.module (if present):"
-          sudo cat /etc/keyfactor/keyfactor.module 2>/dev/null || true
-          sudo cat /usr/share/p11-kit/modules/keyfactor.module 2>/dev/null || true
-
-          echo "✅ Recent logs:"
           sudo journalctl -u KeyfactorService -n 120 --no-pager || true
+          ss -ltnp || true
 
       - name: Resolve PKCS#11 module path (prefer /etc/keyfactor/keyfactor.module)
         id: pkcs11
@@ -221,74 +201,74 @@ jobs:
           EOF
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: Inventory tokens (Ubuntu 22.04+ preferred command)
+      - name: Token inventory (p11tool; non-fatal)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
         run: |
           set -euo pipefail
-          echo "=== p11tool --list-tokens (preferred on 22.04+) ==="
+          echo "=== p11tool --list-tokens (non-fatal) ==="
           p11tool --list-tokens --provider "$MODULE_PATH" || true
 
-      - name: Best-effort cert extraction via pkcs11-tool (do not fail job here)
-        id: certs
+      - name: Choose certificate by subject (pkcs11-tool; required)
+        id: cert
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
+          EXPECTED_SUBJECT_FRAGMENT: ${{ env.EXPECTED_SUBJECT_FRAGMENT }}
         run: |
           set -euo pipefail
 
-          set +e
-          CERTS="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>&1)"
-          RC=$?
-          set -e
+          echo "🔎 Looking for cert with subject containing: $EXPECTED_SUBJECT_FRAGMENT"
 
-          echo "$CERTS"
+          OUT="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>&1)"
+          echo "$OUT"
 
-          if [ "$RC" -ne 0 ]; then
-            echo "⚠️ pkcs11-tool failed (rc=$RC). Continuing. If jsign needs an alias, set secrets.CERT_ALIAS."
-            echo "alias=" >> "$GITHUB_OUTPUT"
-            echo "alias_label=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          MATCH_BLOCK="$(printf "%s\n" "$OUT" | awk '
+            BEGIN{RS="Certificate Object"; ORS=""}
+            NR>1{
+              block="Certificate Object"$0
+              if (block ~ /subject:/ && block ~ ENVIRON["EXPECTED_SUBJECT_FRAGMENT"]) { print block; exit }
+            }')"
 
-          ID="$(echo "$CERTS" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r" | tr '[:lower:]' '[:upper:]')"
-          LABEL="$(echo "$CERTS" | awk -F': *' '/^ *label:/ {print $2; exit}' | tr -d "\r")"
-
-          echo "alias=${ID:-$LABEL}" >> "$GITHUB_OUTPUT"
-          echo "alias_label=${LABEL:-}" >> "$GITHUB_OUTPUT"
-
-      - name: Sign with jsign (CERT_ALIAS secret wins; else auto-detect)
-        shell: bash
-        env:
-          CERT_ALIAS_SECRET: ${{ secrets.CERT_ALIAS || '' }}
-          AUTO_ALIAS: ${{ steps.certs.outputs.alias }}
-        run: |
-          set -euo pipefail
-
-          if [ -n "${CERT_ALIAS_SECRET:-}" ]; then
-            ALIAS="$CERT_ALIAS_SECRET"
-            echo "✅ Using CERT_ALIAS from secrets"
-          else
-            ALIAS="${AUTO_ALIAS:-}"
-            echo "ℹ️ Using auto-detected alias (may be empty if pkcs11-tool failed)"
-          fi
-
-          if [ -z "${ALIAS:-}" ]; then
-            echo "❌ No alias available."
-            echo "➡️ Set secrets.CERT_ALIAS to a cert ID you expect (e.g. 170570A1D56F...)."
+          if [ -z "${MATCH_BLOCK:-}" ]; then
+            echo "❌ No certificate matched subject fragment: $EXPECTED_SUBJECT_FRAGMENT"
+            echo "➡️ This likely means the CodeSigningCertificate cert/private key is not provisioned to this agent via PKCS#11."
             exit 1
           fi
+
+          ID="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r" | tr '[:lower:]' '[:upper:]')"
+          LABEL="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *label:/ {print $2; exit}' | tr -d "\r")"
+          SUBJECT="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *subject:/ {print $2; exit}' | tr -d "\r")"
+
+          echo "✅ Selected certificate:"
+          echo "   Subject: $SUBJECT"
+          echo "   Label:   ${LABEL:-<none>}"
+          echo "   ID:      ${ID:-<none>}"
+
+          if [ -z "${ID:-}" ]; then
+            echo "❌ Matched cert but could not extract ID"
+            exit 1
+          fi
+
+          echo "alias=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Sign with jsign using selected certificate
+        shell: bash
+        env:
+          CERT_ALIAS: ${{ steps.cert.outputs.alias }}
+        run: |
+          set -euo pipefail
 
           mkdir -p "$OUT_DIR"
           cp -f hello-world-app.exe "$OUT_DIR/"
 
-          echo "✍️ Signing with alias: $ALIAS"
+          echo "✍️ Signing with alias: $CERT_ALIAS"
           jsign \
             --storetype PKCS11 \
             --keystore "$PKCS11_PROVIDER_CFG" \
             --storepass NONE \
-            --alias "$ALIAS" \
+            --alias "$CERT_ALIAS" \
             "$OUT_DIR/hello-world-app.exe"
 
           echo "✅ Output:"
