@@ -18,9 +18,6 @@ jobs:
       PKCS11_PROVIDER_CFG: "keyfactorpkcs11.cfg"
       OUT_DIR: "signed-output"
 
-      # What you expect to find (used for selection later if you want)
-      EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,10 +30,10 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
-          USER_PIN: ${{ secrets.USER_PIN }}
+          CERT_ALIAS: ${{ secrets.CERT_ALIAS }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL USER_PIN; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL CERT_ALIAS; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -44,22 +41,19 @@ jobs:
           done
           echo "✅ Secrets validated"
 
-      - name: Install prerequisites (OpenSC, p11tool, Java, mingw, curl)
+      - name: Install prerequisites (p11tool, Java, mingw, curl)
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
             p11-kit gnutls-bin \
             default-jre-headless \
             mingw-w64 \
             curl ca-certificates
 
           echo "✅ Versions:"
-          command -v pkcs11-tool && pkcs11-tool --version || true
           command -v p11tool && p11tool --version || true
-          command -v keytool && echo "keytool present" || true
 
       - name: Create a random EXE to sign (Windows PE)
         shell: bash
@@ -100,14 +94,8 @@ jobs:
             exit 1
           fi
 
-          echo "⬇️ Downloading Keyfactor agent..."
           curl -fsSL -o kf-agent.deb "$AGENT_URL"
-
-          echo "📦 Installing Keyfactor agent..."
           sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
-
-          echo "✅ Installed packages:"
-          dpkg -l | grep -i keyfactor || true
 
       - name: Configure agent (keyfactor-setup) + restart service
         shell: bash
@@ -132,12 +120,11 @@ jobs:
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
 
-      - name: Wait for KeyfactorService + show diagnostics
+      - name: Wait for KeyfactorService + show logs
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "⏳ Waiting for KeyfactorService..."
           for i in {1..60}; do
             if systemctl is-active --quiet KeyfactorService; then
               echo "✅ KeyfactorService is active"
@@ -153,27 +140,6 @@ jobs:
             exit 1
           fi
 
-          echo "✅ Service status:"
-          sudo systemctl status KeyfactorService --no-pager || true
-
-          echo "✅ Listening ports:"
-          ss -ltnp || true
-
-          echo "✅ /etc/keyfactor:"
-          sudo ls -la /etc/keyfactor || true
-
-          echo "✅ Redacted /etc/keyfactor/config:"
-          if [ -f /etc/keyfactor/config ]; then
-            sudo sed -E 's/(password|clientid|username|hostname)=.*/\1=***REDACTED***/Ig' /etc/keyfactor/config || true
-          else
-            echo "⚠️ /etc/keyfactor/config missing"
-          fi
-
-          echo "✅ keyfactor.module (if present):"
-          sudo cat /etc/keyfactor/keyfactor.module 2>/dev/null || true
-          sudo cat /usr/share/p11-kit/modules/keyfactor.module 2>/dev/null || true
-
-          echo "✅ Recent logs:"
           sudo journalctl -u KeyfactorService -n 120 --no-pager || true
 
       - name: Resolve PKCS#11 module path (prefer /etc/keyfactor/keyfactor.module)
@@ -208,12 +174,18 @@ jobs:
           fi
 
           echo "✅ PKCS#11 module: $FOUND"
-          ls -la "$FOUND" || true
-          ldd "$FOUND" || true
-
           echo "module=$FOUND" >> "$GITHUB_OUTPUT"
 
-      - name: Write SunPKCS11 config (minimal)
+      - name: Confirm provider initializes (p11tool)
+        shell: bash
+        env:
+          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
+        run: |
+          set -euo pipefail
+          echo "🔎 p11tool --list-tokens --provider $MODULE_PATH"
+          p11tool --list-tokens --provider "$MODULE_PATH"
+
+      - name: Write SunPKCS11 config (for jsign)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
@@ -225,99 +197,28 @@ jobs:
           EOF
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: List ALL tokens, certs, and keys (PKCS#11 inventory)
+      - name: Sign with jsign using CERT_ALIAS secret
         shell: bash
         env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-          USER_PIN: ${{ secrets.USER_PIN }}
+          CERT_ALIAS: ${{ secrets.CERT_ALIAS }}
         run: |
           set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          cp -f hello-world-app.exe "$OUT_DIR/"
 
-          echo "========================================"
-          echo "PKCS#11 MODULE"
-          echo "  $MODULE_PATH"
-          echo "========================================"
-          ls -la "$MODULE_PATH" || true
-          ldd "$MODULE_PATH" || true
-          echo
+          echo "✍️ Signing with alias (CERT_ALIAS): $CERT_ALIAS"
+          jsign \
+            --storetype PKCS11 \
+            --keystore "$PKCS11_PROVIDER_CFG" \
+            --storepass NONE \
+            --alias "$CERT_ALIAS" \
+            "$OUT_DIR/hello-world-app.exe"
 
-          echo "========================================"
-          echo "TOKENS (p11tool - preferred on 22.04+)"
-          echo "========================================"
-          if command -v p11tool >/dev/null 2>&1; then
-            p11tool --list-tokens --provider "$MODULE_PATH" || true
-          else
-            echo "p11tool not found"
-          fi
-          echo
+          echo "✅ Output:"
+          ls -la "$OUT_DIR"
 
-          echo "========================================"
-          echo "SLOTS (pkcs11-tool)"
-          echo "========================================"
-          pkcs11-tool --module "$MODULE_PATH" --list-slots --verbose || true
-          echo
-
-          SLOT="$(pkcs11-tool --module "$MODULE_PATH" --list-slots 2>/dev/null \
-            | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}' || true)"
-
-          if [ -z "${SLOT:-}" ]; then
-            echo "⚠️ Could not parse a slot number; will run listings without --slot."
-          else
-            echo "✅ Using slot: $SLOT"
-          fi
-          echo
-
-          echo "========================================"
-          echo "CERTIFICATES"
-          echo "========================================"
-          if [ -n "${SLOT:-}" ]; then
-            CERTS="$(pkcs11-tool --module "$MODULE_PATH" --slot "$SLOT" --list-objects --type cert 2>&1 || true)"
-          else
-            CERTS="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert 2>&1 || true)"
-          fi
-          echo "$CERTS"
-          echo
-
-          echo "---- Parsed certificate summary (Label / Subject / ID) ----"
-          echo "$CERTS" | awk '
-            BEGIN{label=""; subj=""; id=""}
-            /^Certificate Object/ { if (label||subj||id){print "Label: "label"\nSubject: "subj"\nID: "id"\n---"}; label="";subj="";id=""; next}
-            /^[[:space:]]*label:/   {sub(/^[[:space:]]*label:[[:space:]]*/,""); label=$0; next}
-            /^[[:space:]]*subject:/ {sub(/^[[:space:]]*subject:[[:space:]]*/,""); subj=$0; next}
-            /^[[:space:]]*ID:/      {sub(/^[[:space:]]*ID:[[:space:]]*/,""); id=$0; next}
-            END{ if (label||subj||id){print "Label: "label"\nSubject: "subj"\nID: "id"\n---"} }
-          ' | sed -n '1,400p'
-          echo
-
-          echo "========================================"
-          echo "PUBLIC KEYS"
-          echo "========================================"
-          if [ -n "${SLOT:-}" ]; then
-            pkcs11-tool --module "$MODULE_PATH" --slot "$SLOT" --list-objects --type pubkey --verbose || true
-          else
-            pkcs11-tool --module "$MODULE_PATH" --list-objects --type pubkey --verbose || true
-          fi
-          echo
-
-          echo "========================================"
-          echo "PRIVATE KEYS (requires login)"
-          echo "========================================"
-          if [ -z "${USER_PIN:-}" ]; then
-            echo "⚠️ USER_PIN secret not set; skipping private key listing."
-            exit 0
-          fi
-
-          if [ -n "${SLOT:-}" ]; then
-            pkcs11-tool --module "$MODULE_PATH" --slot "$SLOT" --login --pin "$USER_PIN" --list-objects --type privkey --verbose || true
-          else
-            pkcs11-tool --module "$MODULE_PATH" --login --pin "$USER_PIN" --list-objects --type privkey --verbose || true
-          fi
-
-      - name: Upload artifacts (unsigned EXE + logs directory if created)
+      - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pkcs11-inventory-output
-          path: |
-            hello-world-app.exe
-            signed-output/*
-          if-no-files-found: ignore
+          name: SignedFile-Linux-Agent
+          path: signed-output/*
