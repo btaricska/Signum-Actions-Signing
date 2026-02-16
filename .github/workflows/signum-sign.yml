@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      # Kept for continuity (Docker auth is optional; container not used in this deb-based flow)
+      # Kept for continuity (Docker auth optional; container not used in this deb-based flow)
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
@@ -90,7 +90,6 @@ jobs:
           echo "✅ Tool versions:"
           command -v pkcs11-tool && pkcs11-tool --version || true
           command -v p11tool && p11tool --version || true
-          command -v keytool && keytool -help >/dev/null 2>&1 && echo "keytool OK" || true
 
       - name: Create a random EXE to sign (Windows PE)
         shell: bash
@@ -117,16 +116,31 @@ jobs:
           sudo dpkg -i jsign.deb || (sudo apt-get install -f -y && sudo dpkg -i jsign.deb)
           jsign --version || true
 
-      - name: Download & install Keyfactor Agent (.deb) and start service
+      - name: Download & install Keyfactor Agent (.deb) and start service (robust URL handling)
         shell: bash
         env:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
 
-          echo "⬇️ Downloading Keyfactor agent .deb from:"
-          echo "$KF_AGENT_DEB_URL"
-          curl -fsSL -o kf-agent.deb "$KF_AGENT_DEB_URL"
+          # Trim whitespace/newlines and avoid printing the secret
+          AGENT_URL="$(printf "%s" "${KF_AGENT_DEB_URL:-}" | tr -d '\r' | xargs)"
+
+          if [ -z "${AGENT_URL:-}" ]; then
+            echo "❌ KF_AGENT_DEB_URL is empty"
+            exit 1
+          fi
+
+          # Basic URL sanity check without echoing the URL
+          if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
+            echo "❌ KF_AGENT_DEB_URL does not look like an http(s) URL."
+            echo "➡️ Fix the secret: store ONLY the URL, single line, no quotes, no extra text."
+            echo "ℹ️ Secret length: ${#AGENT_URL}"
+            exit 1
+          fi
+
+          echo "⬇️ Downloading Keyfactor agent .deb..."
+          curl -fsSL -o kf-agent.deb "$AGENT_URL"
 
           echo "📦 Installing Keyfactor agent..."
           sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
@@ -214,22 +228,25 @@ jobs:
           echo "✅ Provider config written to $PKCS11_PROVIDER_CFG"
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: Token/cert inventory (p11tool preferred on 22.04+; pkcs11-tool fallback)
+      - name: Token/cert inventory (22.04+: p11tool preferred; pkcs11-tool fallback)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.find_module.outputs.module }}
-          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
           echo "=== p11tool (preferred on Ubuntu 22.04+) ==="
           if command -v p11tool >/dev/null 2>&1; then
             p11tool --list-tokens --provider "${MODULE_PATH}" 2>/dev/null | sed -n '1,200p' || true
+          else
+            echo "p11tool not found"
           fi
 
           echo "=== pkcs11-tool (fallback) ==="
           if command -v pkcs11-tool >/dev/null 2>&1; then
             pkcs11-tool --module "${MODULE_PATH}" --list-slots --verbose 2>/dev/null || true
+          else
+            echo "pkcs11-tool not found"
           fi
 
           echo "=== keytool cert inventory ==="
