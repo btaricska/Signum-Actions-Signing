@@ -18,7 +18,7 @@ jobs:
       FILE_TO_SIGN: "file.bin"
       SIG_OUT: "file.bin.sig"
 
-      # Optional: if you WANT to pick a specific cert by subject text
+      # If you want to try matching a specific cert subject, set this (optional)
       EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
 
     steps:
@@ -56,7 +56,7 @@ jobs:
           command -v pkcs11-tool
           pkcs11-tool --version || true
 
-      - name: Create a random file to sign
+      - name: Create random file to sign
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
           ls -la "$FILE_TO_SIGN"
           sha256sum "$FILE_TO_SIGN" || true
 
-      - name: Install Keyfactor Agent (.deb)
+      - name: Download & install Keyfactor Agent (.deb)
         shell: bash
         env:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
@@ -81,10 +81,16 @@ jobs:
             exit 1
           fi
 
+          echo "⬇️ Downloading agent from:"
+          echo "$AGENT_URL"
           curl -fsSL -o kf-agent.deb "$AGENT_URL"
+
+          echo "📦 Installing agent..."
           sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
 
-      - name: Configure agent (keyfactor-setup) + restart service
+          dpkg -l | grep -i keyfactor || true
+
+      - name: Configure agent (keyfactor-setup)
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -94,8 +100,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo -e "loglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null || true
-
           sudo keyfactor-setup \
             hostname="$SIGNUM_HOSTNAME" \
             clientid="$SIGNUM_CLIENTID" \
@@ -103,24 +107,62 @@ jobs:
             password="$SIGNUM_PASSWORD" \
             loglevel=HIGH logtype=FILE
 
+      - name: Pick free port + write Keyfactor config + restart service
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PORT=$(comm -23 <(seq 50000 60000 | sort) <(ss -ltn | awk 'NR>1{print $4}' | awk -F: '{print $NF}' | sort -u) | shuf -n 1)
+          echo "✅ Using port $PORT"
+
+          echo -e "port=${PORT}\nloglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null
+          echo "✅ /etc/keyfactor/config:"
+          sudo cat "$KF_CFG_PATH"
+
           sudo systemctl daemon-reload || true
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
 
-      - name: Wait for KeyfactorService
+      - name: Wait for KeyfactorService to be stable (no restarts)
         shell: bash
         run: |
           set -euo pipefail
-          for i in {1..60}; do
+
+          echo "⏳ Waiting for KeyfactorService to be stable..."
+          STABLE_SECONDS=15
+          DEADLINE=$((SECONDS+180))
+
+          while [ $SECONDS -lt $DEADLINE ]; do
             if systemctl is-active --quiet KeyfactorService; then
-              echo "✅ KeyfactorService is active"
-              exit 0
+              OK=1
+              for i in $(seq 1 $STABLE_SECONDS); do
+                if ! systemctl is-active --quiet KeyfactorService; then
+                  OK=0
+                  break
+                fi
+                sleep 1
+              done
+
+              if [ "$OK" -eq 1 ]; then
+                echo "✅ KeyfactorService stayed active for ${STABLE_SECONDS}s"
+                echo "✅ Status:"
+                sudo systemctl status KeyfactorService --no-pager || true
+                echo "✅ Recent logs:"
+                sudo journalctl -u KeyfactorService -n 120 --no-pager || true
+                echo "✅ Listening ports:"
+                ss -ltnp || true
+                exit 0
+              fi
             fi
-            sleep 1
+
+            echo "…service not stable yet; last 30 log lines:"
+            sudo journalctl -u KeyfactorService -n 30 --no-pager || true
+            sleep 2
           done
-          echo "❌ KeyfactorService not active"
+
+          echo "❌ KeyfactorService never became stable"
           sudo systemctl status KeyfactorService --no-pager || true
-          sudo journalctl -u KeyfactorService -n 200 --no-pager || true
+          sudo journalctl -u KeyfactorService -n 300 --no-pager || true
           exit 1
 
       - name: Resolve PKCS#11 module path
@@ -156,10 +198,9 @@ jobs:
           echo "✅ PKCS#11 module: $FOUND"
           ls -la "$FOUND" || true
           ldd "$FOUND" || true
-
           echo "module=$FOUND" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for PKCS#11 to initialize (C_Initialize must succeed)
+      - name: Wait for PKCS#11 provider to initialize (C_Initialize must succeed)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
@@ -167,7 +208,7 @@ jobs:
           set -euo pipefail
 
           echo "⏳ Waiting for PKCS#11 provider to initialize..."
-          for i in {1..60}; do
+          for i in {1..120}; do
             if pkcs11-tool --module "$MODULE_PATH" --list-slots >/dev/null 2>&1; then
               echo "✅ PKCS#11 initialized"
               pkcs11-tool --module "$MODULE_PATH" --list-slots --verbose || true
@@ -198,8 +239,7 @@ jobs:
           echo "=== PRIVKEYS (slot 0, login) ==="
           pkcs11-tool --module "$MODULE_PATH" --slot 0 --login --pin "$USER_PIN" --list-objects --type privkey --verbose || true
 
-      - name: Choose a key + sign file (PKCS#11)
-        id: sign
+      - name: Choose cert ID + sign (pkcs11-tool)
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
@@ -211,7 +251,6 @@ jobs:
           CERTS="$(pkcs11-tool --module "$MODULE_PATH" --slot 0 --list-objects --type cert 2>&1)"
           echo "$CERTS"
 
-          # If you want subject matching, use it; otherwise take first cert ID.
           MATCH_BLOCK="$(printf "%s\n" "$CERTS" | awk '
             BEGIN{RS="Certificate Object"; ORS=""}
             NR>1{
@@ -221,32 +260,31 @@ jobs:
 
           if [ -n "${MATCH_BLOCK:-}" ]; then
             CERT_ID="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r")"
+            echo "✅ Found matching cert for subject fragment: $EXPECTED_SUBJECT_FRAGMENT"
           else
             CERT_ID="$(echo "$CERTS" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r")"
+            echo "ℹ️ No subject match; using first cert ID"
           fi
 
           if [ -z "${CERT_ID:-}" ]; then
             echo "❌ Could not select a certificate ID"
             exit 1
           fi
-
           echo "✅ Using cert/key ID: $CERT_ID"
 
-          echo "🔑 Listing private keys (login) to ensure key exists..."
+          echo "🔑 Ensuring private keys are visible (login)..."
           PRIV="$(pkcs11-tool --module "$MODULE_PATH" --slot 0 --login --pin "$USER_PIN" --list-objects --type privkey 2>&1 || true)"
           echo "$PRIV"
 
           if ! echo "$PRIV" | grep -qi "Private Key Object"; then
-            echo "❌ No private key objects visible (cannot sign)."
+            echo "❌ No private keys visible; cannot sign."
             exit 1
           fi
 
           mkdir -p "$OUT_DIR"
           cp -f "$FILE_TO_SIGN" "$OUT_DIR/"
 
-          # Pick mechanism based on what your token supports. RSA-PKCS is common for RSA.
           MECH="RSA-PKCS"
-
           echo "✍️ Signing $OUT_DIR/$FILE_TO_SIGN -> $OUT_DIR/$SIG_OUT"
           pkcs11-tool \
             --module "$MODULE_PATH" \
@@ -259,12 +297,12 @@ jobs:
             --input-file "$OUT_DIR/$FILE_TO_SIGN" \
             --output-file "$OUT_DIR/$SIG_OUT"
 
-          echo "✅ Signed output:"
+          echo "✅ Output:"
           ls -la "$OUT_DIR"
           sha256sum "$OUT_DIR/$FILE_TO_SIGN" || true
           sha256sum "$OUT_DIR/$SIG_OUT" || true
 
-      - name: Upload signed artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pkcs11-signed-output
