@@ -17,7 +17,6 @@ jobs:
       KF_CFG_PATH: "/etc/keyfactor/config"
       PKCS11_PROVIDER_CFG: "keyfactorpkcs11.cfg"
       OUT_DIR: "signed-output"
-      PKCS11_MODULE_DEFAULT: "/usr/lib/libkeyfactorpkcs11.so"
 
     steps:
       - name: Checkout
@@ -41,20 +40,17 @@ jobs:
           done
           echo "✅ Secrets validated"
 
-      - name: Install prerequisites (OpenSC, Java, mingw, curl)
+      - name: Install prerequisites
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
+            p11-kit gnutls-bin \
             default-jre-headless \
             mingw-w64 \
             curl ca-certificates
-
-          echo "✅ Tool versions:"
-          command -v pkcs11-tool && pkcs11-tool --version || true
-          command -v keytool && echo "keytool present" || true
 
       - name: Create a random EXE to sign (Windows PE)
         shell: bash
@@ -67,8 +63,6 @@ jobs:
           EOF
           x86_64-w64-mingw32-gcc -O2 -s -o hello-world-app.exe hello.c
           echo "✅ Created hello-world-app.exe"
-          file hello-world-app.exe
-          ls -la hello-world-app.exe
 
       - name: Install jsign (.deb)
         shell: bash
@@ -84,22 +78,14 @@ jobs:
           KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
         run: |
           set -euo pipefail
-
           AGENT_URL="$(printf "%s" "${KF_AGENT_DEB_URL:-}" | tr -d '\r' | xargs)"
-          if [ -z "${AGENT_URL:-}" ]; then
-            echo "❌ KF_AGENT_DEB_URL is empty"
-            exit 1
-          fi
+          if [ -z "${AGENT_URL:-}" ]; then echo "❌ KF_AGENT_DEB_URL empty"; exit 1; fi
           if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
-            echo "❌ KF_AGENT_DEB_URL does not look like a URL (store ONLY the URL, one line, no quotes)."
+            echo "❌ KF_AGENT_DEB_URL must be ONLY the URL (one line, no quotes)."
             echo "ℹ️ Length: ${#AGENT_URL}"
             exit 1
           fi
-
-          echo "⬇️ Downloading keyfactor agent .deb..."
           curl -fsSL -o kf-agent.deb "$AGENT_URL"
-
-          echo "📦 Installing keyfactor agent..."
           sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
 
       - name: Configure agent (keyfactor-setup) + restart service
@@ -121,66 +107,93 @@ jobs:
             password="$SIGNUM_PASSWORD" \
             loglevel=HIGH logtype=FILE
 
-          echo "🚀 Restarting KeyfactorService..."
           sudo systemctl daemon-reload || true
           sudo systemctl enable KeyfactorService || true
           sudo systemctl restart KeyfactorService
 
-      - name: Wait for KeyfactorService to be ready
+      - name: Wait for service + dump diagnostics
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "⏳ Waiting for KeyfactorService to report active..."
+          echo "⏳ Waiting for KeyfactorService..."
           for i in {1..60}; do
             if systemctl is-active --quiet KeyfactorService; then
-              echo "✅ KeyfactorService is active"
+              echo "✅ KeyfactorService active"
               break
             fi
             sleep 1
           done
 
           if ! systemctl is-active --quiet KeyfactorService; then
-            echo "❌ KeyfactorService is not active"
+            echo "❌ KeyfactorService not active"
             sudo systemctl status KeyfactorService --no-pager || true
             sudo journalctl -u KeyfactorService -n 200 --no-pager || true
             exit 1
           fi
 
+          echo "✅ KeyfactorService status:"
+          sudo systemctl status KeyfactorService --no-pager || true
+
           echo "✅ Listening ports:"
           ss -ltnp || true
 
-          echo "✅ Last 120 log lines:"
-          sudo journalctl -u KeyfactorService -n 120 --no-pager || true
+          echo "✅ /etc/keyfactor contents:"
+          sudo ls -la /etc/keyfactor || true
 
-      - name: Find PKCS#11 module path
+          echo "✅ Show /etc/keyfactor/config keys (redacted):"
+          if [ -f /etc/keyfactor/config ]; then
+            sudo sed -E 's/(password|clientid|username|hostname)=.*/\1=***REDACTED***/Ig' /etc/keyfactor/config || true
+          else
+            echo "⚠️ /etc/keyfactor/config missing"
+          fi
+
+          echo "✅ p11-kit module file(s):"
+          sudo ls -la /usr/share/p11-kit/modules || true
+          sudo ls -la /etc/keyfactor || true
+          sudo cat /etc/keyfactor/keyfactor.module 2>/dev/null || true
+          sudo cat /usr/share/p11-kit/modules/keyfactor.module 2>/dev/null || true
+
+          echo "✅ Try curl to local service URL (insecure, just reachability):"
+          URL="$(sudo systemctl status KeyfactorService --no-pager | awk '/Now listening on:/ {print $NF; exit}')"
+          echo "Detected URL: ${URL:-<none>}"
+          if [ -n "${URL:-}" ]; then
+            curl -k -sS -o /dev/null -w "curl_http=%{http_code}\n" "$URL" || true
+          fi
+
+      - name: Resolve PKCS#11 module path (prefer p11-kit module file)
         id: pkcs11
         shell: bash
         run: |
           set -euo pipefail
-          CANDIDATES=(
-            "$PKCS11_MODULE_DEFAULT"
-            /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so
-            /usr/lib/libkeyfactorpkcs11.so
-            /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so
-            /usr/lib64/libkeyfactorpkcs11.so
-          )
 
-          FOUND=""
-          for p in "${CANDIDATES[@]}"; do
-            if [ -f "$p" ]; then FOUND="$p"; break; fi
-          done
+          # Prefer module path from keyfactor.module (created by agent install)
+          MODFILE="/etc/keyfactor/keyfactor.module"
+          if [ -f "$MODFILE" ]; then
+            FOUND="$(awk -F'"' '/module:/ {print $2; exit}' "$MODFILE" || true)"
+          fi
 
-          if [ -z "$FOUND" ]; then
+          # Fallback to common locations
+          if [ -z "${FOUND:-}" ]; then
+            for p in \
+              /usr/lib/libkeyfactorpkcs11.so \
+              /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so \
+              /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so \
+              /usr/lib64/libkeyfactorpkcs11.so; do
+              if [ -f "$p" ]; then FOUND="$p"; break; fi
+            done
+          fi
+
+          if [ -z "${FOUND:-}" ]; then
             FOUND="$(sudo find / -type f -name 'libkeyfactorpkcs11.so' 2>/dev/null | head -n 1 || true)"
           fi
 
-          if [ -z "$FOUND" ]; then
+          if [ -z "${FOUND:-}" ]; then
             echo "❌ libkeyfactorpkcs11.so not found"
             exit 1
           fi
 
-          echo "✅ PKCS#11 module: $FOUND"
+          echo "✅ Using PKCS#11 module: $FOUND"
           echo "module=$FOUND" >> "$GITHUB_OUTPUT"
 
       - name: Write SunPKCS11 config (minimal)
@@ -195,37 +208,17 @@ jobs:
           EOF
           cat "$PKCS11_PROVIDER_CFG"
 
-      - name: List certificates via PKCS#11 (retry until module initializes)
+      - name: List certs via pkcs11-tool (with debug)
         id: certs
         shell: bash
         env:
           MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
         run: |
           set -euo pipefail
+          echo "🔎 pkcs11-tool cert list (debug):"
+          P11_KIT_DEBUG=all pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert
 
-          echo "⏳ Waiting for PKCS#11 C_Initialize to succeed..."
-          for i in {1..60}; do
-            if pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert >/tmp/certs.out 2>/tmp/certs.err; then
-              echo "✅ PKCS#11 module initialized and certs listed"
-              break
-            fi
-            echo "Attempt $i failed: $(tail -n 1 /tmp/certs.err || true)"
-            sleep 1
-          done
-
-          if ! pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert >/tmp/certs.out 2>/tmp/certs.err; then
-            echo "❌ PKCS#11 module never initialized successfully"
-            echo "---- pkcs11 stderr ----"
-            cat /tmp/certs.err || true
-            echo "---- KeyfactorService status/logs ----"
-            sudo systemctl status KeyfactorService --no-pager || true
-            sudo journalctl -u KeyfactorService -n 200 --no-pager || true
-            exit 1
-          fi
-
-          cat /tmp/certs.out
-          CERTS="$(cat /tmp/certs.out)"
-
+          CERTS="$(pkcs11-tool --module "$MODULE_PATH" --list-objects --type cert)"
           ID="$(echo "$CERTS" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r" | tr '[:lower:]' '[:upper:]')"
           LABEL="$(echo "$CERTS" | awk -F': *' '/^ *label:/ {print $2; exit}' | tr -d "\r")"
 
@@ -244,7 +237,6 @@ jobs:
           CERT_ALIAS_LABEL: ${{ steps.certs.outputs.alias_label }}
         run: |
           set -euo pipefail
-
           mkdir -p "$OUT_DIR"
           cp -f hello-world-app.exe "$OUT_DIR/"
 
@@ -266,9 +258,7 @@ jobs:
                 --storepass NONE \
                 --alias "$CERT_ALIAS_LABEL" \
                 "$OUT_DIR/hello-world-app.exe"
-              echo "✅ Signed using label ${CERT_ALIAS_LABEL}"
             else
-              echo "❌ No label fallback available."
               exit 1
             fi
           fi
