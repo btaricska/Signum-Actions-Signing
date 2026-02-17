@@ -1,271 +1,234 @@
-name: Sign File via Signum Agent (Windows, KSP/CSP)
+Property(S): Text_Next = Next
+Property(S): ButtonText_Back = < &Back
+Property(S): ButtonText_Next = &Next >
+Property(S): Text_Install = Install
+Property(S): CompleteSetupIcon = completi
+Property(S): CustomSetupIcon = custicon
+Property(S): DefaultUIFont = DlgFont8
+Property(S): DlgTitleFont = {\DlgFontBold8}
+Property(S): ExclamationIcon = exclamic
+Property(S): InfoIcon = info
+Property(S): InstallerIcon = insticon
+Property(S): RemoveIcon = removico
+Property(S): RepairIcon = repairic
+Property(S): UpDirIcon = Up
+Property(S): NewDirIcon = New
+Property(S): AI_ThemeStyle = aero
+Property(S): AI_FrameColor = steelblue
+Property(S): AI_LOG_CHECKBOX = 1
+Property(S): AiStyleConditions =  
+Property(S): TabBackground = tabback
+Property(S): AI_BUILD_NAME = DefaultBuild
+Property(S): AI_PREREQS_DIR = [TempFolder]KeyFactor\KeyFactor\prerequisites
+Property(S): AI_BOOTSTRAPPERLANGS = 3082;1033;1027;1046;
+Property(S): AI_BOOTSTRAPPERORIGINALLANG = 3082
+Property(S): PreReqSearch_A5FAD2_A0AB_492E_9F3A_AiVerMin = 4.0.8482.1
+Property(S): SavedGamesFolder = C:\Users\runneradmin\Saved Games\
+Property(S): PreReqSearch_A918597FE054CCCB65ABDBAiVerMin = 14.30.30704
+Property(S): IIsWWWRootFolder = C:\inetpub\wwwroot\
+Property(S): UserProfileFolder = C:\Users\runneradmin\
+Property(S): PublicFolder = C:\Users\Public\
+Property(S): PublicDocumentsFolder = C:\Users\Public\Documents\
+Property(S): WindowsLibrariesFolder = C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Libraries\
+Property(S): DOTNET4_VERSION = #533325
+Property(S): VersionNT64 = 1000
+Property(S): SystemFolder = C:\Windows\SysWOW64\
+Property(S): System64Folder = C:\Windows\system32\
+Property(S): CLIENTUILEVEL = 3
+Property(S): CURRENTDIRECTORY = D:\a\Signum-Actions-Signing\Signum-Actions-Signing
+Property(S): PackagecodeChanging = 1
+Property(S): ProductState = -1
+Property(S): PackageCode = {BC22065D-D03B-4A7C-8A44-37424EDD6574}
+Property(S): MsiLogFileLocation = C:\Users\RUNNER~1\AppData\Local\Temp\kf-agent-install.log
+Property(S): REBOOT = ReallySuppress
+Property(S): VersionNT = 1000
+Property(S): RedirectedDllSupport = 2
+Property(S): ACTION = INSTALL
+Property(S): PreReqSearch_A918597FE054CCCB65ABDB = 14.50.35719
+Property(S): PreReqSearch_1_A918597FE054CCCB65AB = 14.50.35719
+Property(S): PreReqSearch_C4FE6FD5B7C4D07B3A313E = 14.50.35719
+Property(S): CLIENTPROCESSID = 4184
+Property(S): MsiRestartManagerSessionKey = e31e4981a5cfcd45bf1891e1f778a682
+Property(S): VersionDatabase = 200
+Property(S): VersionMsi = 5.00
+Property(S): WindowsBuild = 20348
+Property(S): ServicePackLevel = 0
+Property(S): ServicePackLevelMinor = 0
+Property(S): MsiNTProductType = 3
+Property(S): MsiNTSuiteDataCenter = 1
+Property(S): WindowsFolder = C:\Windows\
+Property(S): WindowsVolume = C:\
+Property(S): RemoteAdminTS = 1
+Property(S): TempFolder = C:\Users\RUNNER~1\AppData\Local\Temp\
+Property(S): ProgramFilesFolder = C:\Program Files (x86)\
+Property(S): CommonFilesFolder = C:\Program Files (x86)\Common Files\
+Property(S): ProgramFiles64Folder = C:\Program Files\
+Property(S): CommonFiles64Folder = C:\Program Files\Common Files\
+Property(S): AppDataFolder = C:\Users\runneradmin\AppData\Roaming\
+Property(S): FavoritesFolder = C:\Users\runneradmin\Favorites\
+Property(S): NetHoodFolder = C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Network Shortcuts\
+Property(S): PersonalFolder = C:\Users\runneradmin\Documents\
+Property(S): PrintHoodFolder = C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Printer Shortcuts\
+Property(S): RecentFolder = C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Recent\
+Property(S): SendToFolder = C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\SendTo\
+Property(S): TemplateFolder = C:\ProgramData\Microsoft\Windows\Templates\
+Property(S): CommonAppDataFolder = C:\ProgramData\
+Property(S): LocalAppDataFolder = C:\Users\runneradmin\AppData\Local\
+Property(S): MyPicturesFolder = C:\Users\runneradmin\Pictures\
+Property(S): AdminToolsFolder = C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Administrative Tools\
+Property(S): StartupFolder = C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\
+Property(S): ProgramMenuFolder = C:\ProgramData\Microsoft\Windows\Start Menu\Programs\
+Property(S): StartMenuFolder = C:\ProgramData\Microsoft\Windows\Start Menu\
+Property(S): DesktopFolder = C:\Users\Public\Desktop\
+Property(S): FontsFolder = C:\Windows\Fonts\
+Property(S): GPTSupport = 1
+Property(S): OLEAdvtSupport = 1
+Property(S): ShellAdvtSupport = 1
+Property(S): MsiAMD64 = 25
+Property(S): Msix64 = 25
+Property(S): Intel = 25
+Property(S): PhysicalMemory = 16383
+Property(S): VirtualMemory = 17284
+Property(S): AdminUser = 1
+Property(S): MsiTrueAdminUser = 1
+Property(S): LogonUser = runneradmin
+Property(S): UserSID = S-1-5-21-1291252476-2496227594-1293935756-500
+Property(S): UserLanguageID = 1033
+Property(S): ComputerName = runnervmxtjmx
+Property(S): SystemLanguageID = 1033
+Property(S): ScreenX = 1024
+Property(S): ScreenY = 768
+Property(S): CaptionHeight = 19
+Property(S): BorderTop = 1
+Property(S): BorderSide = 1
+Property(S): TextHeight = 16
+Property(S): TextInternalLeading = 3
+Property(S): ColorBits = 32
+Property(S): TTCSupport = 1
+Property(S): Time = 14:30:26
+Property(S): Date = 2/17/2026
+Property(S): MsiNetAssemblySupport = 4.8.9037.0
+Property(S): MsiWin32AssemblySupport = 6.3.20348.2849
+Property(S): MsiRunningElevated = 1
+Property(S): Privileged = 1
+Property(S): DATABASE = C:\Windows\Installer\1f4dfb.msi
+Property(S): OriginalDatabase = C:\Users\RUNNER~1\AppData\Local\Temp\keyfactor-agent.msi
+Property(S): UILevel = 2
+Property(S): PreReqSearch_C4FE6FD5B7C4D07B3A313EAiVerMin = 14.30.30704
+Property(S): PreReqSearch_1_A918597FE054CCCB65ABAiVerMin = 14.30.30704
+MSI (s) (08:70) [14:30:26:498]: Note: 1: 1708 
+MSI (s) (08:70) [14:30:26:498]: Transforming table Error.
 
-on:
-  workflow_dispatch:
-    inputs:
-      file_to_sign:
-        description: "Path to file to sign (relative to repo root)"
-        required: false
-        default: "hello-world-app.exe"
-  push:
-    branches: ["main"]
+MSI (s) (08:70) [14:30:26:498]: Transforming table Error.
 
-permissions:
-  contents: read
+MSI (s) (08:70) [14:30:26:498]: Product: KeyFactor -- Installation failed.
 
-jobs:
-  sign-windows:
-    runs-on: windows-2022
+MSI (s) (08:70) [14:30:26:498]: Windows Installer installed the product. Product Name: KeyFactor. Product Version: 4.40.1. Product Language: 1033. Manufacturer: KeyFactor. Installation success or error status: 1603.
 
-    env:
-      OUT_DIR: "signed-output"
-      FILE_TO_SIGN: ${{ github.event.inputs.file_to_sign || 'hello-world-app.exe' }}
-      EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
-      DEFAULT_AGENT_MSI_URL: "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
+MSI (s) (08:70) [14:30:26:498]: Deferring clean up of packages/files, if any exist
+MSI (s) (08:70) [14:30:26:498]: MainEngineThread is returning 1603
+MSI (s) (08:0C) [14:30:26:498]: RESTART MANAGER: Session closed.
+MSI (s) (08:0C) [14:30:26:498]: No System Restore sequence number for this installation.
+=== Logging stopped: 2/17/2026  14:30:26 ===
+MSI (s) (08:0C) [14:30:26:498]: User policy value 'DisableRollback' is 0
+MSI (s) (08:0C) [14:30:26:498]: Machine policy value 'DisableRollback' is 0
+MSI (s) (08:0C) [14:30:26:498]: Incrementing counter to disable shutdown. Counter after increment: 0
+MSI (s) (08:0C) [14:30:26:498]: Note: 1: 1402 2: HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Installer\Rollback\Scripts 3: 2 
+MSI (s) (08:0C) [14:30:26:498]: Note: 1: 1402 2: HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Installer\Rollback\Scripts 3: 2 
+MSI (s) (08:0C) [14:30:26:498]: Decrementing counter to disable shutdown. If counter >= 0, shutdown will be denied.  Counter after decrement: -1
+MSI (s) (08:0C) [14:30:26:498]: Destroying RemoteAPI object.
+MSI (s) (08:08) [14:30:26:498]: Custom Action Manager thread ending.
+MSI (c) (58:20) [14:30:26:498]: Decrementing counter to disable shutdown. If counter >= 0, shutdown will be denied.  Counter after decrement: -1
+MSI (c) (58:20) [14:30:26:498]: MainEngineThread is returning 1603
+=== Verbose logging stopped: 2/17/2026  14:30:26 ===
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+---- MSI log failure context (Return value 3) ----
+Action ended 14:30:26: AI_DetectSoftware. Return value 1.
+MSI (s) (08:60) [14:30:26:405]: Invoking remote custom action. DLL: C:\Windows\Installer\MSI565F.tmp, Entrypoint: DoAppSearchEx
+Action start 14:30:26: AI_AppSearchEx.
+MSI (s) (08!4C) [14:30:26:420]: PROPERTY CHANGE: Adding PreReqSearch_A918597FE054CCCB65ABDBAiVerMin property. Its value is '14.30.30704'.
+MSI (s) (08!4C) [14:30:26:420]: PROPERTY CHANGE: Adding PreReqSearch_A918597FE054CCCB65ABDB property. Its value is '14.50.35719'.
+MSI (s) (08!4C) [14:30:26:420]: PROPERTY CHANGE: Adding PreReqSearch_A5FAD2_A0AB_492E_9F3A_AiVerMin property. Its value is '4.0.8482.1'.
+MSI (s) (08!4C) [14:30:26:420]: PROPERTY CHANGE: Adding PreReqSearch_C4FE6FD5B7C4D07B3A313EAiVerMin property. Its value is '14.30.30704'.
+MSI (s) (08!4C) [14:30:26:420]: PROPERTY CHANGE: Adding PreReqSearch_C4FE6FD5B7C4D07B3A313E property. Its value is '14.50.35719'.
+MSI (s) (08!4C) [14:30:26:436]: PROPERTY CHANGE: Adding PreReqSearch_1_A918597FE054CCCB65ABAiVerMin property. Its value is '14.30.30704'.
+MSI (s) (08!4C) [14:30:26:436]: PROPERTY CHANGE: Adding PreReqSearch_1_A918597FE054CCCB65AB property. Its value is '14.50.35719'.
+MSI (s) (08:70) [14:30:26:436]: Doing action: FindRelatedProducts
+Action ended 14:30:26: AI_AppSearchEx. Return value 1.
+Action start 14:30:26: FindRelatedProducts.
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamAGENTID (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamONLY_KSP (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: CHOOSE_PROVIDER_NAME (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamCLIENTID (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Doing action: SetParam_REQUEST_LOGIN_AT_STARTUP_NO_PARAMS
+Action ended 14:30:26: FindRelatedProducts. Return value 1.
+MSI (s) (08:70) [14:30:26:436]: PROPERTY CHANGE: Adding REQUEST_LOGIN_AT_STARTUP property. Its value is '0'.
+Action start 14:30:26: SetParam_REQUEST_LOGIN_AT_STARTUP_NO_PARAMS.
+MSI (s) (08:70) [14:30:26:436]: Doing action: SetParam_REQUEST_LOGIN_AT_STARTUP
+Action ended 14:30:26: SetParam_REQUEST_LOGIN_AT_STARTUP_NO_PARAMS. Return value 1.
+Action start 14:30:26: SetParam_REQUEST_LOGIN_AT_STARTUP.
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParam_REQUEST_LOGIN_AT_STARTUP_PREVIOUS (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamRTPRIMARY_URL (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamRTPRIMARY_URL_1 (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamRTSECONDARY_URL (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamRTSECONDARY_URL_1 (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamRTSECONDARY_URL_2 (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamCustomError (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamLANGUAGE (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Doing action: UnknownError_ES
+Action ended 14:30:26: SetParam_REQUEST_LOGIN_AT_STARTUP. Return value 1.
+MSI (s) (08:70) [14:30:26:436]: PROPERTY CHANGE: Modifying UNKNOWNERROR property. Its current value is 'value'. Its new value: '<html lang="en"><head> <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/> <title>Unknown error</title> <style>body{height: 98%; font-family: Verdana, Arial, sans-serif; font-size: 1em; color: #333; background-color: #FFF; background-attachment: fixed;}#defaultMessage{display: block; position: static; overflow: inherit; background-color: #FFF; background-repeat: no-repeat; padding: 20px; width: 50%; margin: 0 auto; font-size: 0.9em; min-height: 200px; -moz-border-radius: 6px; -webkit-border-radius: 6px; -khtml-border-radius: 6px; behavior: url(border-radius.htc); border-radius: 6px; -webkit-box-shadow: 0px 2px 4px #000; -moz-box-shadow: 0px 2px 4px #000; box-shadow: 0px 2px 4px #000;}#defaultMessage>div{text-align: center;}#defaultMessage span{font-size: 1.1em;}.messageExtended{width: 80%; margin: 0 auto; color: #666;}</style></head><body align="center"> <br/> <br/> <div style="width:100%;text-align:center;"> <div style="width:80%;text-alig
+Action start 14:30:26: UnknownError_ES.
+MSI (s) (08:70) [14:30:26:436]: Skipping action: UnknownError_EN (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamDEFAULTDOMAIN (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamAUTHMODE (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamAGENTMODE (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: CheckAuthenticationMode (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamTIMEOUT_SECONDS (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: AI_DATA_SETTER_2 (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: Fix_PREVIOUS_PIN_EXPIRATION_value (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamPIN_EXPIRATION (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamWEBPROXY_URI (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: AI_DOWNGRADE (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamHIDE_TRAYICON (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Skipping action: SetParamAGENTSERVERCREDENTIALS (condition is false)
+MSI (s) (08:70) [14:30:26:436]: Doing action: LaunchConditions
+Action ended 14:30:26: UnknownError_ES. Return value 1.
+MSI (s) (08:70) [14:30:26:436]: Transforming table LaunchCondition.
 
-      - name: Resolve agent MSI URL (vars -> secrets -> default)
-        shell: pwsh
-        env:
-          MSI_FROM_VARS: ${{ vars.KF_AGENT_MSI_URL || '' }}
-          MSI_FROM_SECRETS: ${{ secrets.KF_AGENT_MSI_URL || '' }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $msi = ($env:MSI_FROM_VARS ?? "").Trim()
-          if ([string]::IsNullOrWhiteSpace($msi)) { $msi = ($env:MSI_FROM_SECRETS ?? "").Trim() }
-          if ([string]::IsNullOrWhiteSpace($msi)) { $msi = ($env:DEFAULT_AGENT_MSI_URL ?? "").Trim() }
+Action start 14:30:26: LaunchConditions.
+MSI (s) (08:70) [14:30:26:436]: Transforming table Error.
 
-          if (-not ($msi -match '^https?://')) { throw "Resolved MSI URL invalid: '$msi'" }
+MSI (s) (08:70) [14:30:26:436]: Product: KeyFactor -- Missing parameters: RTPRIMARY = "ip_primary_unit" {RTSECONDARY = "ip_secondary_unit"} CLIENTID = "key" {CUSTOMERROR = "errorMessage"} {LANGUAGE = "CultureCode"}
 
-          "KF_AGENT_MSI_URL=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "✅ KF_AGENT_MSI_URL resolved to: $msi"
-
-      - name: Validate required Signum secrets
-        shell: pwsh
-        env:
-          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $required = @('SIGNUM_HOSTNAME','SIGNUM_CLIENTID','SIGNUM_USERNAME','SIGNUM_PASSWORD')
-          $missing = @()
-          foreach ($r in $required) {
-            $v = (Get-ChildItem env:$r -ErrorAction SilentlyContinue).Value
-            if ([string]::IsNullOrWhiteSpace($v)) { $missing += $r }
-          }
-          if ($missing.Count -gt 0) { throw "Missing secrets: $($missing -join ', ')" }
-          Write-Host "✅ Signum secrets validated"
-
-      - name: Download MSI
-        id: dl
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $url = ($env:KF_AGENT_MSI_URL ?? "").Trim()
-          if ([string]::IsNullOrWhiteSpace($url)) { throw "KF_AGENT_MSI_URL is empty" }
-
-          $msi = Join-Path $env:TEMP 'keyfactor-agent.msi'
-          $log = Join-Path $env:TEMP 'kf-agent-install.log'
-
-          Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
-          Write-Host "✅ Downloaded MSI to $msi"
-          Get-Item $msi | Format-List Name,Length,LastWriteTime
-
-          # Unblock in case Windows marked it as downloaded-from-internet (can break custom actions)
-          try { Unblock-File -Path $msi -ErrorAction SilentlyContinue } catch {}
-
-          "MSI_PATH=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "MSI_LOG=$log"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Install MSI (verbose log + extract real failure)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          $msi = $env:MSI_PATH
-          $log = $env:MSI_LOG
-          if (-not (Test-Path $msi)) { throw "MSI not found at $msi" }
-
-          # Try two common install styles: per-machine ALLUSERS=1, then default
-          $attempts = @(
-            "/i `"$msi`" ALLUSERS=1 MSIINSTALLPERUSER=0 /qn /norestart /l*v `"$log`"",
-            "/i `"$msi`" /qn /norestart /l*v `"$log`""
-          )
-
-          $ok = $false
-          foreach ($args in $attempts) {
-            Write-Host "=== msiexec $args ==="
-            if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
-
-            $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $args
-            Write-Host "msiexec exit code: $($p.ExitCode)"
-
-            if ($p.ExitCode -eq 0) { $ok = $true; break }
-
-            Write-Host "---- MSI log tail ----"
-            if (Test-Path $log) { Get-Content $log -Tail 200 }
-
-            # The real failure is usually near "Return value 3"
-            Write-Host "---- MSI log failure context (Return value 3) ----"
-            if (Test-Path $log) {
-              $lines = Get-Content $log
-              $idx = ($lines | Select-String -Pattern "Return value 3" | Select-Object -First 1).LineNumber
-              if ($idx) {
-                $start = [Math]::Max(0, $idx - 60)
-                $end   = [Math]::Min($lines.Count-1, $idx + 20)
-                $lines[$start..$end] | ForEach-Object { $_ }
-              } else {
-                Write-Host "(No 'Return value 3' found)"
-              }
-            }
-          }
-
-          if (-not $ok) {
-            Write-Host "---- Installed products containing Keyfactor/Redtrust/Evolium ----"
-            Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* `
-              -ErrorAction SilentlyContinue |
-              Where-Object { $_.DisplayName -match 'Keyfactor|Redtrust|Evolium' } |
-              Select-Object DisplayName, DisplayVersion, Publisher |
-              Format-Table -AutoSize
-
-            Write-Host "---- Services containing Keyfactor ----"
-            Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Format-Table -AutoSize
-
-            throw "MSI install failed (see uploaded MSI log artifact)."
-          }
-
-          Write-Host "✅ MSI installed successfully"
-
-      - name: Upload MSI install log (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kf-agent-msi-install-log
-          path: ${{ env.MSI_LOG }}
-
-      - name: Configure agent (keyfactor-setup) and restart service
-        shell: pwsh
-        env:
-          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
-          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
-          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          # Find keyfactor-setup.exe
-          $kfCmd = Get-Command keyfactor-setup -ErrorAction SilentlyContinue
-          $kf = if ($kfCmd) { $kfCmd.Path } else { $null }
-
-          if (-not $kf) {
-            $common = @(
-              "C:\Program Files\Keyfactor\Agent\keyfactor-setup.exe",
-              "C:\Program Files\Keyfactor\Service\keyfactor-setup.exe",
-              "C:\Program Files\Keyfactor\keyfactor-setup.exe"
-            )
-            foreach ($p in $common) { if (Test-Path $p) { $kf = $p; break } }
-          }
-
-          if (-not $kf) {
-            $found = Get-ChildItem -Path "C:\Program Files" -Filter "keyfactor-setup.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $kf = $found.FullName }
-          }
-
-          if (-not $kf) { throw "keyfactor-setup.exe not found after MSI install." }
-          Write-Host "✅ Using keyfactor-setup: $kf"
-
-          & $kf `
-            hostname="$env:SIGNUM_HOSTNAME" `
-            clientid="$env:SIGNUM_CLIENTID" `
-            username="$env:SIGNUM_USERNAME" `
-            password="$env:SIGNUM_PASSWORD" `
-            loglevel=HIGH logtype=FILE
-
-          # Restart Keyfactor-ish service (name can vary)
-          $svc = Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Sort-Object Name | Select-Object -First 1
-          if (-not $svc) { throw "No Keyfactor service found." }
-
-          Restart-Service -Name $svc.Name -Force
-          Start-Sleep -Seconds 3
-          $svc2 = Get-Service -Name $svc.Name
-          Write-Host "Service status: $($svc2.Status)"
-          if ($svc2.Status -ne 'Running') { throw "Service not running after restart." }
-
-      - name: Verify file to sign exists
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not (Test-Path -Path $env:FILE_TO_SIGN)) {
-            Write-Error "File to sign not found: $env:FILE_TO_SIGN"
-            Get-ChildItem -Force
-            exit 1
-          }
-          Write-Host "✅ Signing: $env:FILE_TO_SIGN"
-          Get-Item $env:FILE_TO_SIGN | Format-List
-
-      - name: Find certificate thumbprint (by secret or subject)
-        id: find_cert
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT_SECRET: ${{ secrets.CERT_THUMBPRINT || '' }}
-          EXPECTED_SUBJECT_FRAGMENT: ${{ env.EXPECTED_SUBJECT_FRAGMENT }}
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          if (-not [string]::IsNullOrWhiteSpace($env:CERT_THUMBPRINT_SECRET)) {
-            $tp = $env:CERT_THUMBPRINT_SECRET.Trim().Replace(' ','').ToUpper()
-            "thumbprint=$tp" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            Write-Host "✅ Using thumbprint from secret"
-            exit 0
-          }
-
-          $frag = $env:EXPECTED_SUBJECT_FRAGMENT
-          $found = $null
-          foreach ($store in @('LocalMachine','CurrentUser')) {
-            $certs = Get-ChildItem -Path "Cert:\$store\My" -ErrorAction SilentlyContinue
-            foreach ($c in $certs) { if ($c.Subject -like "*$frag*") { $found = $c; break } }
-            if ($found) { break }
-          }
-
-          if (-not $found) {
-            Write-Host "Sample cert subjects:"
-            Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host $_.Subject }
-            Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host $_.Subject }
-            throw "No certificate found matching '$frag'. Set secrets.CERT_THUMBPRINT."
-          }
-
-          $tp = $found.Thumbprint.Replace(' ','').ToUpper()
-          "thumbprint=$tp" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "✅ Found certificate thumbprint."
-
-      - name: Sign with signtool
-        shell: pwsh
-        env:
-          THUMBPRINT: ${{ steps.find_cert.outputs.thumbprint }}
-          TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $thumb = $env:THUMBPRINT
-          if ([string]::IsNullOrWhiteSpace($thumb)) { throw "No thumbprint available." }
-
-          $file = Resolve-Path -Path $env:FILE_TO_SIGN
-          $sigtool = Get-Command signtool -ErrorAction SilentlyContinue
-          if (-not $sigtool) { throw "signtool not found on runner." }
-
-          & signtool sign /sm /s My /sha1 $thumb /tr $env:TIMESTAMP_URL /td sha256 /fd sha256 $file
-          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit $LASTEXITCODE" }
-
-          $outdir = Join-Path $PWD $env:OUT_DIR
-          New-Item -ItemType Directory -Path $outdir -Force | Out-Null
-          Copy-Item -Path $file -Destination (Join-Path $outdir (Split-Path $file -Leaf)) -Force
-
-      - name: Upload signed artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-windows-output
-          path: signed-output/*
+Missing parameters: RTPRIMARY = "ip_primary_unit" {RTSECONDARY = "ip_secondary_unit"} CLIENTID = "key" {CUSTOMERROR = "errorMessage"} {LANGUAGE = "CultureCode"}
+Action ended 14:30:26: LaunchConditions. Return value 3.
+Action ended 14:30:26: INSTALL. Return value 3.
+Property(S): AuthMode64 = AuthMode
+Property(S): DefaultDomain64 = DefaultDomain
+Property(S): EnableReport64 = EnableReport
+Property(S): Language64 = Language
+Property(S): RT64Install64 = RT64Install
+Property(S): RedtrustInstallPath64 = RedtrustInstallPath
+Property(S): Dll64 = Dll
+Property(S): FuncName64 = FuncName
+Property(S): ImagePath64 = Image Path
+Property(S): SignInFile64 = SignInFile
+Property(S): Type64 = Type
+Property(S): ONLY_KSP = 0
+Property(S): HIDE_TRAYICON = 0
+Property(S): REQUEST_LOGIN_AT_STARTUP = 0
+Property(S): InstallMode = Typical
+Property(S): DiskPrompt = [1]
+Property(S): UpgradeCode = {B231A5DD-AB45-408C-934E-F489F7DCA9B8}
+Property(S): ProductCode = {3A00AD07-892D-42A1-B3D7-447F355EF240}
+Property(S): AGENTMODE = USER
+Property(S): RegId = Value
+---- Installed products containing Keyfactor/Redtrust/Evolium ----
+---- Services containing Keyfactor ----
+Exception: D:\a\_temp\9373ff2b-9b3a-4cc8-9331-b49854705acf.ps1:53
+Line |
+  53 |    throw "MSI install failed (see uploaded MSI log artifact)."
+     |    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | MSI install failed (see uploaded MSI log artifact).
+Error: Process completed with exit code 1.
