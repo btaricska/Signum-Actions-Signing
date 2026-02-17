@@ -21,62 +21,72 @@ jobs:
       OUT_DIR: "signed-output"
       FILE_TO_SIGN: ${{ github.event.inputs.file_to_sign || 'hello-world-app.exe' }}
       EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
+      DEFAULT_AGENT_MSI_URL: "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Runner info
+      - name: Resolve agent MSI URL (vars -> secrets -> default)
+        id: resolve_msi
         shell: pwsh
+        env:
+          MSI_FROM_VARS: ${{ vars.KF_AGENT_MSI_URL || '' }}
+          MSI_FROM_SECRETS: ${{ secrets.KF_AGENT_MSI_URL || '' }}
+          DEFAULT_AGENT_MSI_URL: ${{ env.DEFAULT_AGENT_MSI_URL }}
         run: |
-          $ErrorActionPreference = "Continue"
-          Write-Host "Runner OS:"
-          cmd /c ver
-          Write-Host "PowerShell:"
-          $PSVersionTable
+          $ErrorActionPreference = "Stop"
 
-      - name: Validate required secrets/vars
+          $msi = ($env:MSI_FROM_VARS ?? "").Trim()
+          if ([string]::IsNullOrWhiteSpace($msi)) {
+            $msi = ($env:MSI_FROM_SECRETS ?? "").Trim()
+          }
+          if ([string]::IsNullOrWhiteSpace($msi)) {
+            $msi = ($env:DEFAULT_AGENT_MSI_URL ?? "").Trim()
+            Write-Host "✅ Using DEFAULT_AGENT_MSI_URL from workflow"
+          } else {
+            Write-Host "✅ Using KF_AGENT_MSI_URL from vars/secrets"
+          }
+
+          if (-not ($msi -match '^https?://')) {
+            throw "Resolved MSI URL is invalid: '$msi'"
+          }
+
+          "KF_AGENT_MSI_URL=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "msi_url=$msi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "MSI URL resolved."
+
+      - name: Validate required Signum secrets
         shell: pwsh
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          # IMPORTANT: you said you created a "secret variable" => use vars.*
-          KF_AGENT_MSI_URL: ${{ vars.KF_AGENT_MSI_URL }}
           CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT || '' }}
           TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
         run: |
           $ErrorActionPreference = "Stop"
-
-          $required = @('SIGNUM_HOSTNAME','SIGNUM_CLIENTID','SIGNUM_USERNAME','SIGNUM_PASSWORD','KF_AGENT_MSI_URL')
+          $required = @('SIGNUM_HOSTNAME','SIGNUM_CLIENTID','SIGNUM_USERNAME','SIGNUM_PASSWORD')
           $missing = @()
           foreach ($r in $required) {
             $v = (Get-ChildItem env:$r -ErrorAction SilentlyContinue).Value
             if ([string]::IsNullOrWhiteSpace($v)) { $missing += $r }
           }
           if ($missing.Count -gt 0) {
-            Write-Error "Missing values: $($missing -join ', '). If KF_AGENT_MSI_URL is an Actions Variable, reference vars.KF_AGENT_MSI_URL."
-            exit 1
+            throw "Missing secrets: $($missing -join ', ')"
           }
-
-          $url = $env:KF_AGENT_MSI_URL.Trim()
-          if (-not ($url -match '^https?://')) {
-            Write-Error "KF_AGENT_MSI_URL must be a plain http(s) URL. Got: '$url'"
-            exit 1
-          }
-
-          Write-Host "✅ Inputs validated"
-          Write-Host "MSI URL: $url"
+          Write-Host "✅ Signum secrets validated"
 
       - name: Install Keyfactor Agent (MSI)
         shell: pwsh
-        env:
-          KF_AGENT_MSI_URL: ${{ vars.KF_AGENT_MSI_URL }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $url = $env:KF_AGENT_MSI_URL.Trim()
+          $url = ($env:KF_AGENT_MSI_URL ?? "").Trim()
+          if ([string]::IsNullOrWhiteSpace($url)) { throw "KF_AGENT_MSI_URL is empty after resolution step." }
+          if (-not ($url -match '^https?://')) { throw "KF_AGENT_MSI_URL invalid: '$url'" }
+
           $msi = Join-Path $env:TEMP 'keyfactor-agent.msi'
           $log = Join-Path $env:TEMP 'kf-agent-install.log'
 
@@ -89,16 +99,15 @@ jobs:
           Write-Host "📦 Installing MSI silently..."
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$log`""
           Write-Host "msiexec exit code: $($p.ExitCode)"
-
           if ($p.ExitCode -ne 0) {
-            Write-Host "---- MSI install log tail ----"
+            Write-Host "---- installer log tail ----"
             if (Test-Path $log) { Get-Content $log -Tail 200 }
             throw "MSI install failed with exit code $($p.ExitCode)"
           }
 
-          Write-Host "✅ MSI install complete"
+          Write-Host "✅ MSI installed"
 
-      - name: Configure agent (keyfactor-setup) and start service
+      - name: Configure agent (keyfactor-setup) and restart service
         shell: pwsh
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -122,15 +131,12 @@ jobs:
           }
 
           if (-not $kf) {
-            Write-Host "🔎 Searching for keyfactor-setup.exe under C:\Program Files ..."
+            Write-Host "🔎 Searching for keyfactor-setup.exe..."
             $found = Get-ChildItem -Path "C:\Program Files" -Filter "keyfactor-setup.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) { $kf = $found.FullName }
           }
 
-          if (-not $kf) {
-            throw "keyfactor-setup.exe not found after MSI install."
-          }
-
+          if (-not $kf) { throw "keyfactor-setup.exe not found after MSI install." }
           Write-Host "✅ Using keyfactor-setup: $kf"
 
           & $kf `
@@ -141,50 +147,18 @@ jobs:
             loglevel=HIGH logtype=FILE
 
           # Find Keyfactor service (name varies)
-          $svc = Get-Service | Where-Object {
-            $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor'
-          } | Sort-Object Name | Select-Object -First 1
-
+          $svc = Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Sort-Object Name | Select-Object -First 1
           if (-not $svc) {
-            Write-Host "All services matching Keyfactor:"
             Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Format-Table -AutoSize
             throw "No Keyfactor service found."
           }
 
-          Write-Host "✅ Using service: $($svc.Name) ($($svc.DisplayName))"
+          Write-Host "✅ Restarting service: $($svc.Name) ($($svc.DisplayName))"
           Restart-Service -Name $svc.Name -Force
           Start-Sleep -Seconds 3
-
           $svc2 = Get-Service -Name $svc.Name
           Write-Host "Service status: $($svc2.Status)"
-          if ($svc2.Status -ne 'Running') {
-            throw "Service '$($svc2.Name)' is not running after restart."
-          }
-
-      - name: Wait for agent service to be stable
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $svc = Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Select-Object -First 1
-          if (-not $svc) { throw "Keyfactor service not found." }
-
-          $deadline = (Get-Date).AddMinutes(3)
-          while ((Get-Date) -lt $deadline) {
-            $s = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
-            if ($s -and $s.Status -eq 'Running') {
-              Start-Sleep -Seconds 10
-              $s2 = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
-              if ($s2 -and $s2.Status -eq 'Running') {
-                Write-Host "✅ Service stable: $($svc.Name)"
-                exit 0
-              }
-            }
-            Start-Sleep -Seconds 2
-          }
-
-          Write-Error "Service did not become stable in time: $($svc.Name)"
-          exit 1
+          if ($svc2.Status -ne 'Running') { throw "Service not running after restart." }
 
       - name: Verify file to sign exists
         shell: pwsh
@@ -192,7 +166,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           if (-not (Test-Path -Path $env:FILE_TO_SIGN)) {
             Write-Error "File to sign not found: $env:FILE_TO_SIGN"
-            Write-Host "Workspace listing:"
             Get-ChildItem -Force
             exit 1
           }
@@ -216,7 +189,7 @@ jobs:
           }
 
           $frag = $env:EXPECTED_SUBJECT_FRAGMENT
-          Write-Host "🔎 Searching for certificate subject containing: $frag"
+          Write-Host "🔎 Searching cert stores for subject containing: $frag"
 
           $found = $null
           foreach ($store in @('LocalMachine','CurrentUser')) {
