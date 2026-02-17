@@ -14,13 +14,14 @@ jobs:
     runs-on: windows-latest
     env:
       OUT_DIR: signed-output
-      FILE_TO_SIGN: hello-world-app.exe
       EXPECTED_SUBJECT_FRAGMENT: CN=CodeSigningCertificate
+
+      # Build inputs (adjust these)
+      PROJECT_PATH: .\hello-world-app\hello-world-app.csproj
+      BUILD_CONFIGURATION: Release
 
       # Agent download/install
       MSI_LANGUAGE: en-US
-
-      # If you already have a direct MSI URL, set this secret (recommended).
       KF_AGENT_MSI_URL: ${{ secrets.KF_AGENT_MSI_URL }}
 
       # Keyfactor / Signum connection (store these as secrets)
@@ -35,22 +36,51 @@ jobs:
 
       - name: Ensure PowerShell 7
         shell: pwsh
-        run: |
-          $PSVersionTable
+        run: $PSVersionTable
 
       - name: Prepare output folder
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "${env:OUT_DIR}" | Out-Null
 
-      - name: Validate signing input exists
+      # --- BUILD THE EXE (so it exists) ---
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build / Publish Windows exe
         shell: pwsh
         run: |
-          $path = Join-Path $env:GITHUB_WORKSPACE $env:FILE_TO_SIGN
-          if (-not (Test-Path $path)) {
-            throw "File to sign not found: $path"
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          if (-not (Test-Path $env:PROJECT_PATH)) {
+            throw "PROJECT_PATH not found: $env:PROJECT_PATH"
           }
-          Write-Host "Will sign: $path"
+
+          # Publish self-contained exe (common for signing)
+          dotnet publish $env:PROJECT_PATH `
+            -c $env:BUILD_CONFIGURATION `
+            -r win-x64 `
+            --self-contained true `
+            /p:PublishSingleFile=true `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            -o (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR)
+
+          # Find the produced exe in OUT_DIR (ignore vshost etc.)
+          $outDir = Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR
+          $exe = Get-ChildItem -Path $outDir -Filter *.exe -File |
+                 Where-Object { $_.Name -notmatch 'vshost' } |
+                 Sort-Object Length -Descending |
+                 Select-Object -First 1
+
+          if (-not $exe) {
+            throw "No .exe produced in $outDir. Check your build/publish settings."
+          }
+
+          "FILE_TO_SIGN=$($exe.Name)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Will sign produced exe: $($exe.FullName)"
 
       - name: Set MSI paths (no runner.temp)
         shell: pwsh
@@ -219,11 +249,59 @@ jobs:
           Write-Section "Agent ready"
           Write-Host "✅ Agent installed, configured, and service restarted."
 
+      # --- SIGN THE PRODUCED EXE (it’s in OUT_DIR now) ---
+      - name: Validate signing input exists
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          $path = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR) $env:FILE_TO_SIGN
+          if (-not (Test-Path $path)) {
+            throw "File to sign not found: $path"
+          }
+          Write-Host "Will sign: $path"
+
       - name: Sign file
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
-          $in  = Join-Path $env:GITHUB_WORKSPACE $env:FILE_TO_SIGN
-          $out = Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR
+          $signed = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR) $env:FILE_TO_SIGN
+
+          if (-not (Get-Command signtool.exe -ErrorAction SilentlyContinue)) {
+            throw "signtool.exe not found on PATH. Add a step to install Windows SDK or use an agent-specific signing CLI."
+          }
+
+          Write-Host "Signing: $signed"
+          & signtool.exe sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 "$signed"
+
+      - name: Verify signature subject
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          $signed = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR) $env:FILE_TO_SIGN
+          if (-not (Test-Path $signed)) { throw "Signed file not found: $signed" }
+
+          $sig = Get-AuthenticodeSignature -FilePath $signed
+          Write-Host "Signature status: $($sig.Status)"
+          if ($sig.SignerCertificate) {
+            Write-Host "Signer subject: $($sig.SignerCertificate.Subject)"
+          }
+
+          if ($sig.Status -ne "Valid") { throw "Signature is not valid: $($sig.Status)" }
+
+          $subject = $sig.SignerCertificate.Subject
+          if ($subject -notlike "*$($env:EXPECTED_SUBJECT_FRAGMENT)*") {
+            throw "Signer subject does not contain expected fragment: '$($env:EXPECTED_SUBJECT_FRAGMENT)'. Actual: '$subject'"
+          }
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-output
+          path: ${{ env.OUT_DIR }}
+          if-no-files-found: error
