@@ -18,47 +18,85 @@ jobs:
     runs-on: windows-2022
 
     env:
-      # Paths / outputs
       OUT_DIR: "signed-output"
       FILE_TO_SIGN: ${{ github.event.inputs.file_to_sign || 'hello-world-app.exe' }}
-      SIG_OUT_SUFFIX: ".sig"            # for non-Authenticode signatures if used
       EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required secrets
+      - name: Runner info
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          Write-Host "Runner OS:"
+          cmd /c ver
+          Write-Host "PowerShell:"
+          $PSVersionTable
+
+      - name: Validate required secrets/vars
         shell: pwsh
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          KF_AGENT_MSI_URL: ${{ secrets.KF_AGENT_MSI_URL }}
+          # IMPORTANT: you said you created a "secret variable" => use vars.*
+          KF_AGENT_MSI_URL: ${{ vars.KF_AGENT_MSI_URL }}
           CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT || '' }}
+          TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
         run: |
+          $ErrorActionPreference = "Stop"
+
           $required = @('SIGNUM_HOSTNAME','SIGNUM_CLIENTID','SIGNUM_USERNAME','SIGNUM_PASSWORD','KF_AGENT_MSI_URL')
           $missing = @()
           foreach ($r in $required) {
-            if (-not (Get-ChildItem env:$r).Value) { $missing += $r }
+            $v = (Get-ChildItem env:$r -ErrorAction SilentlyContinue).Value
+            if ([string]::IsNullOrWhiteSpace($v)) { $missing += $r }
           }
-          if ($missing.Count -gt 0) { Write-Error "Missing secrets: $($missing -join ', ')" ; exit 1 }
-          Write-Host "✅ Secrets validated"
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing values: $($missing -join ', '). If KF_AGENT_MSI_URL is an Actions Variable, reference vars.KF_AGENT_MSI_URL."
+            exit 1
+          }
+
+          $url = $env:KF_AGENT_MSI_URL.Trim()
+          if (-not ($url -match '^https?://')) {
+            Write-Error "KF_AGENT_MSI_URL must be a plain http(s) URL. Got: '$url'"
+            exit 1
+          }
+
+          Write-Host "✅ Inputs validated"
+          Write-Host "MSI URL: $url"
 
       - name: Install Keyfactor Agent (MSI)
         shell: pwsh
         env:
-          KF_AGENT_MSI_URL: ${{ secrets.KF_AGENT_MSI_URL }}
+          KF_AGENT_MSI_URL: ${{ vars.KF_AGENT_MSI_URL }}
         run: |
+          $ErrorActionPreference = "Stop"
+
           $url = $env:KF_AGENT_MSI_URL.Trim()
-          if (-not ($url -match '^https?://')) { Write-Error "KF_AGENT_MSI_URL looks invalid: $url" ; exit 1 }
           $msi = Join-Path $env:TEMP 'keyfactor-agent.msi'
+          $log = Join-Path $env:TEMP 'kf-agent-install.log'
+
+          Write-Host "⬇️ Downloading MSI:"
+          Write-Host $url
           Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
-          Write-Host "Downloaded to $msi"
-          # install silently
-          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msi`" /qn /norestart"
-          Write-Host "Installed MSI (dpkg equivalent on Windows)."
+          Write-Host "✅ Downloaded to $msi"
+          Get-Item $msi | Format-List Name,Length,LastWriteTime
+
+          Write-Host "📦 Installing MSI silently..."
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList "/i `"$msi`" /qn /norestart /l*v `"$log`""
+          Write-Host "msiexec exit code: $($p.ExitCode)"
+
+          if ($p.ExitCode -ne 0) {
+            Write-Host "---- MSI install log tail ----"
+            if (Test-Path $log) { Get-Content $log -Tail 200 }
+            throw "MSI install failed with exit code $($p.ExitCode)"
+          }
+
+          Write-Host "✅ MSI install complete"
 
       - name: Configure agent (keyfactor-setup) and start service
         shell: pwsh
@@ -68,71 +106,97 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
-          # keyfactor-setup may be installed to PATH by MSI; if not, locate it.
-          $kf = Get-Command keyfactor-setup -ErrorAction SilentlyContinue
+          $ErrorActionPreference = "Stop"
+
+          # Find keyfactor-setup.exe
+          $kfCmd = Get-Command keyfactor-setup -ErrorAction SilentlyContinue
+          $kf = if ($kfCmd) { $kfCmd.Path } else { $null }
+
           if (-not $kf) {
-            # common install path - adjust if your MSI installs elsewhere
-            $possible = @(
+            $common = @(
               "C:\Program Files\Keyfactor\Agent\keyfactor-setup.exe",
-              "C:\Program Files\Keyfactor\Service\keyfactor-setup.exe"
+              "C:\Program Files\Keyfactor\Service\keyfactor-setup.exe",
+              "C:\Program Files\Keyfactor\keyfactor-setup.exe"
             )
-            foreach ($p in $possible) { if (Test-Path $p) { $kf = $p; break } }
-          } else {
-            $kf = $kf.Path
+            foreach ($p in $common) { if (Test-Path $p) { $kf = $p; break } }
           }
 
           if (-not $kf) {
-            Write-Host "⚠️ keyfactor-setup not found in PATH; attempting to continue (agent may auto-configure)."
-          } else {
-            Write-Host "Using keyfactor-setup: $kf"
-            & $kf `
-              hostname="$env:SIGNUM_HOSTNAME" `
-              clientid="$env:SIGNUM_CLIENTID" `
-              username="$env:SIGNUM_USERNAME" `
-              password="$env:SIGNUM_PASSWORD" `
-              loglevel=HIGH logtype=FILE
+            Write-Host "🔎 Searching for keyfactor-setup.exe under C:\Program Files ..."
+            $found = Get-ChildItem -Path "C:\Program Files" -Filter "keyfactor-setup.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $kf = $found.FullName }
           }
 
-          # Restart/start the Windows service (service name may vary; try KeyfactorService)
-          $svcName = 'KeyfactorService'
-          if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
-            Restart-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
-            Write-Host "Service $svcName status: $(Get-Service -Name $svcName).Status"
-          } else {
-            Write-Host "⚠️ Service $svcName not found; agent may install under different name — listing services:"
-            Get-Service | Where-Object {$_.Name -like '*Keyfact*' -or $_.DisplayName -like '*Keyfact*'} | Format-Table -AutoSize
+          if (-not $kf) {
+            throw "keyfactor-setup.exe not found after MSI install."
+          }
+
+          Write-Host "✅ Using keyfactor-setup: $kf"
+
+          & $kf `
+            hostname="$env:SIGNUM_HOSTNAME" `
+            clientid="$env:SIGNUM_CLIENTID" `
+            username="$env:SIGNUM_USERNAME" `
+            password="$env:SIGNUM_PASSWORD" `
+            loglevel=HIGH logtype=FILE
+
+          # Find Keyfactor service (name varies)
+          $svc = Get-Service | Where-Object {
+            $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor'
+          } | Sort-Object Name | Select-Object -First 1
+
+          if (-not $svc) {
+            Write-Host "All services matching Keyfactor:"
+            Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Format-Table -AutoSize
+            throw "No Keyfactor service found."
+          }
+
+          Write-Host "✅ Using service: $($svc.Name) ($($svc.DisplayName))"
+          Restart-Service -Name $svc.Name -Force
+          Start-Sleep -Seconds 3
+
+          $svc2 = Get-Service -Name $svc.Name
+          Write-Host "Service status: $($svc2.Status)"
+          if ($svc2.Status -ne 'Running') {
+            throw "Service '$($svc2.Name)' is not running after restart."
           }
 
       - name: Wait for agent service to be stable
         shell: pwsh
         run: |
-          $svcName = 'KeyfactorService'
+          $ErrorActionPreference = "Stop"
+
+          $svc = Get-Service | Where-Object { $_.Name -match 'keyfactor' -or $_.DisplayName -match 'keyfactor' } | Select-Object -First 1
+          if (-not $svc) { throw "Keyfactor service not found." }
+
           $deadline = (Get-Date).AddMinutes(3)
           while ((Get-Date) -lt $deadline) {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -eq 'Running') {
-              # require continuous run for 10s
+            $s = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
+            if ($s -and $s.Status -eq 'Running') {
               Start-Sleep -Seconds 10
-              $svc2 = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-              if ($svc2 -and $svc2.Status -eq 'Running') { Write-Host "✅ $svcName stable and running"; break }
+              $s2 = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
+              if ($s2 -and $s2.Status -eq 'Running') {
+                Write-Host "✅ Service stable: $($svc.Name)"
+                exit 0
+              }
             }
             Start-Sleep -Seconds 2
           }
-          if (-not (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
-            Write-Error "$svcName not found; check installation and logs"; exit 1
-          }
-          if ((Get-Service -Name $svcName).Status -ne 'Running') {
-            Write-Error "$svcName not running after wait; dumping last event logs"
-            Get-WinEvent -MaxEvents 200 -FilterHashtable @{LogName='Application'} | Select-Object -First 20
-            exit 1
-          }
+
+          Write-Error "Service did not become stable in time: $($svc.Name)"
+          exit 1
 
       - name: Verify file to sign exists
         shell: pwsh
         run: |
-          if (-not (Test-Path -Path $env:FILE_TO_SIGN)) { Write-Error "File to sign not found: $env:FILE_TO_SIGN"; exit 1 }
-          Write-Host "Signing: $env:FILE_TO_SIGN"
+          $ErrorActionPreference = "Stop"
+          if (-not (Test-Path -Path $env:FILE_TO_SIGN)) {
+            Write-Error "File to sign not found: $env:FILE_TO_SIGN"
+            Write-Host "Workspace listing:"
+            Get-ChildItem -Force
+            exit 1
+          }
+          Write-Host "✅ Signing: $env:FILE_TO_SIGN"
           Get-Item $env:FILE_TO_SIGN | Format-List
 
       - name: Find certificate thumbprint (by secret or subject)
@@ -142,42 +206,38 @@ jobs:
           CERT_THUMBPRINT_SECRET: ${{ secrets.CERT_THUMBPRINT || '' }}
           EXPECTED_SUBJECT_FRAGMENT: ${{ env.EXPECTED_SUBJECT_FRAGMENT }}
         run: |
-          # Prefer explicit thumbprint via SECRET
-          if ($env:CERT_THUMBPRINT_SECRET -and $env:CERT_THUMBPRINT_SECRET.Trim() -ne "") {
+          $ErrorActionPreference = "Stop"
+
+          if (-not [string]::IsNullOrWhiteSpace($env:CERT_THUMBPRINT_SECRET)) {
             $tp = $env:CERT_THUMBPRINT_SECRET.Trim().Replace(' ','').ToUpper()
             Write-Host "✅ Using thumbprint from secret: $tp"
-            echo "thumbprint=$tp" >> $env:GITHUB_OUTPUT
+            "thumbprint=$tp" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             exit 0
           }
 
-          # Search LocalMachine\My then CurrentUser\My for subject fragment
           $frag = $env:EXPECTED_SUBJECT_FRAGMENT
-          Write-Host "Searching cert stores for subject containing: $frag"
+          Write-Host "🔎 Searching for certificate subject containing: $frag"
 
           $found = $null
-          $stores = @('LocalMachine','CurrentUser')
-          foreach ($s in $stores) {
-            $certs = Get-ChildItem -Path Cert:\$s\My -ErrorAction SilentlyContinue
+          foreach ($store in @('LocalMachine','CurrentUser')) {
+            $certs = Get-ChildItem -Path "Cert:\$store\My" -ErrorAction SilentlyContinue
             foreach ($c in $certs) {
-              if ($c.Subject -like "*$frag*") {
-                $found = $c
-                break
-              }
+              if ($c.Subject -like "*$frag*") { $found = $c; break }
             }
             if ($found) { break }
           }
 
           if (-not $found) {
-            # fallback: list a few certs so logs show what is present
-            Write-Host "⚠️ No cert matched subject fragment. Available cert subjects (sample):"
+            Write-Host "⚠️ No matching cert found. Sample subjects:"
             Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host $_.Subject }
             Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host $_.Subject }
-            Write-Error "No certificate found matching subject fragment. Set secrets.CERT_THUMBPRINT to a known thumbprint if needed." ; exit 1
+            throw "No certificate found matching '$frag'. Set secrets.CERT_THUMBPRINT to force selection."
           }
 
           $tp = $found.Thumbprint.Replace(' ','').ToUpper()
-          Write-Host "✅ Found cert: $($found.Subject)  Thumbprint: $tp"
-          echo "thumbprint=$tp" >> $env:GITHUB_OUTPUT
+          Write-Host "✅ Found cert: $($found.Subject)"
+          Write-Host "Thumbprint: $tp"
+          "thumbprint=$tp" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Sign with signtool (preferred) or PowerShell fallback
         shell: pwsh
@@ -185,46 +245,36 @@ jobs:
           THUMBPRINT: ${{ steps.find_cert.outputs.thumbprint }}
           TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
         run: |
+          $ErrorActionPreference = "Stop"
+
           $thumb = $env:THUMBPRINT
-          if (-not $thumb) { Write-Error "No thumbprint available"; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($thumb)) { throw "No thumbprint available." }
 
           $file = Resolve-Path -Path $env:FILE_TO_SIGN
-
-          # Try signtool (part of Windows SDK). Use /sha1 with machine store if certificate is in LocalMachine
           $sigtool = Get-Command signtool -ErrorAction SilentlyContinue
-          if ($sigtool) {
-            Write-Host "✍️ Using signtool to sign"
-            # prefer to use machine store (LocalMachine) certificate; /sm selects LocalMachine store
-            & signtool sign /sm /s My /sha1 $thumb /tr $env:TIMESTAMP_URL /td sha256 /fd sha256 $file
-            if ($LASTEXITCODE -ne 0) { Write-Error "signtool failed with exit $LASTEXITCODE"; exit $LASTEXITCODE }
-            Write-Host "✅ signtool completed"
-          } else {
-            Write-Host "⚠️ signtool not present, falling back to Set-AuthenticodeSignature"
-            $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $thumb } `
-                    -ErrorAction SilentlyContinue
-            if (-not $cert) {
-              $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb } -ErrorAction SilentlyContinue
-            }
-            if (-not $cert) { Write-Error "Could not load cert by thumbprint"; exit 1 }
 
-            # Set-AuthenticodeSignature's TimestampServer parameter takes a URL
-            $ts = $env:TIMESTAMP_URL
-            $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $cert -TimestampServer $ts
-            if ($signature.Status -ne 'Valid') {
-              Write-Warning "Signature command returned status: $($signature.Status)"
-            } else {
-              Write-Host "✅ Signed via Set-AuthenticodeSignature"
-            }
+          if ($sigtool) {
+            Write-Host "✍️ Using signtool"
+            & signtool sign /sm /s My /sha1 $thumb /tr $env:TIMESTAMP_URL /td sha256 /fd sha256 $file
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit $LASTEXITCODE" }
+          } else {
+            Write-Host "⚠️ signtool not found; using Set-AuthenticodeSignature"
+            $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $thumb }
+            if (-not $cert) { $cert = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $thumb } }
+            if (-not $cert) { throw "Could not load cert by thumbprint from either store." }
+
+            $sig = Set-AuthenticodeSignature -FilePath $file -Certificate $cert -TimestampServer $env:TIMESTAMP_URL
+            Write-Host "Signature status: $($sig.Status)"
           }
 
-          # Copy signed output to OUT_DIR for upload
           $outdir = Join-Path $PWD $env:OUT_DIR
           New-Item -ItemType Directory -Path $outdir -Force | Out-Null
-          Copy-Item -Path $file -Destination (Join-Path $outdir ($file | Split-Path -Leaf)) -Force
+          Copy-Item -Path $file -Destination (Join-Path $outdir (Split-Path $file -Leaf)) -Force
+          Write-Host "✅ Output:"
           Get-ChildItem $outdir | Format-Table
 
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
           name: signed-windows-output
-          path: ${{ env.OUT_DIR }}/*
+          path: signed-output/*
