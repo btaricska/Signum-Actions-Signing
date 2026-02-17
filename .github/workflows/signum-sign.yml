@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   sign:
-    runs-on: ubuntu-22.04
+    # "older version" runner
+    runs-on: ubuntu-20.04
 
     env:
       KF_CFG_PATH: "/etc/keyfactor/config"
@@ -18,7 +19,7 @@ jobs:
       FILE_TO_SIGN: "file.bin"
       SIG_OUT: "file.bin.sig"
 
-      # If you want to try matching a specific cert subject, set this (optional)
+      # Optional subject fragment to bias selection (if present in pkcs11-tool output)
       EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
 
     steps:
@@ -51,10 +52,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
-            curl ca-certificates
+            curl ca-certificates \
+            gnutls-bin
 
           command -v pkcs11-tool
           pkcs11-tool --version || true
+          command -v p11tool || true
+          p11tool --version || true
 
       - name: Create random file to sign
         shell: bash
@@ -197,8 +201,28 @@ jobs:
 
           echo "✅ PKCS#11 module: $FOUND"
           ls -la "$FOUND" || true
-          ldd "$FOUND" || true
           echo "module=$FOUND" >> "$GITHUB_OUTPUT"
+
+      - name: Token inventory (OS-specific)
+        shell: bash
+        env:
+          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
+        run: |
+          set -euo pipefail
+
+          echo "=== OS release ==="
+          cat /etc/os-release || true
+
+          . /etc/os-release || true
+          MAJOR="${VERSION_ID%%.*}"
+
+          if [ "${MAJOR:-0}" -le 20 ]; then
+            echo "✅ Ubuntu ${VERSION_ID} (older): using pkcs11-tool -O"
+            pkcs11-tool --module "$MODULE_PATH" -O || true
+          else
+            echo "✅ Ubuntu ${VERSION_ID} (22.04+): using p11tool --list-tokens"
+            p11tool --list-tokens --provider "$MODULE_PATH" || true
+          fi
 
       - name: Wait for PKCS#11 provider to initialize (C_Initialize must succeed)
         shell: bash
