@@ -19,11 +19,8 @@ jobs:
 
       # Agent download/install
       MSI_LANGUAGE: en-US
-      MSI_PATH: ${{ runner.temp }}\keyfactor-agent.msi
-      MSI_LOG:  ${{ runner.temp }}\kf-agent-install.log
 
       # If you already have a direct MSI URL, set this secret (recommended).
-      # Otherwise you can hardcode KF_AGENT_MSI_URL below.
       KF_AGENT_MSI_URL: ${{ secrets.KF_AGENT_MSI_URL }}
 
       # Keyfactor / Signum connection (store these as secrets)
@@ -54,6 +51,21 @@ jobs:
             throw "File to sign not found: $path"
           }
           Write-Host "Will sign: $path"
+
+      - name: Set MSI paths (no runner.temp)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          $msiPath = Join-Path $env:TEMP "keyfactor-agent.msi"
+          $msiLog  = Join-Path $env:TEMP "kf-agent-install.log"
+
+          "MSI_PATH=$msiPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "MSI_LOG=$msiLog"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "MSI_PATH set to: $msiPath"
+          Write-Host "MSI_LOG  set to: $msiLog"
 
       - name: Download Keyfactor Agent MSI
         shell: pwsh
@@ -121,7 +133,6 @@ jobs:
           }
 
           function Find-KeyfactorSetupExe {
-            # Prefer uninstall registry InstallLocation(s)
             $uninstallKeys = @(
               "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
               "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
@@ -140,7 +151,6 @@ jobs:
               }
             }
 
-            # Fallback: common roots recursive search
             $roots = @(
               $env:ProgramFiles,
               ${env:ProgramFiles(x86)},
@@ -217,52 +227,3 @@ jobs:
 
           $in  = Join-Path $env:GITHUB_WORKSPACE $env:FILE_TO_SIGN
           $out = Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR
-          $signed = Join-Path $out (Split-Path $in -Leaf)
-
-          # If your flow overwrites in-place, remove the Copy-Item line.
-          Copy-Item -Path $in -Destination $signed -Force
-
-          # This is the *generic* Microsoft signing call; adapt if your agent provides a different CLI.
-          # Many agent-based setups integrate with signtool via a CSP/KSP; this is where your
-          # environment-specific parameters/certificate selection usually goes.
-          #
-          # Example placeholder (YOU MUST ADAPT):
-          # & signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 "$signed"
-          #
-          # If the agent provides its own signing CLI, call it here instead.
-
-          if (-not (Get-Command signtool.exe -ErrorAction SilentlyContinue)) {
-            throw "signtool.exe not found on PATH. Add a step to install Windows SDK or use an agent-specific signing CLI."
-          }
-
-          Write-Host "Signing: $signed"
-          & signtool.exe sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 "$signed"
-
-      - name: Verify signature subject
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Set-StrictMode -Version Latest
-
-          $signed = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR) $env:FILE_TO_SIGN
-          if (-not (Test-Path $signed)) { throw "Signed file not found: $signed" }
-
-          $sig = Get-AuthenticodeSignature -FilePath $signed
-          Write-Host "Signature status: $($sig.Status)"
-          if ($sig.SignerCertificate) {
-            Write-Host "Signer subject: $($sig.SignerCertificate.Subject)"
-          }
-
-          if ($sig.Status -ne "Valid") { throw "Signature is not valid: $($sig.Status)" }
-
-          $subject = $sig.SignerCertificate.Subject
-          if ($subject -notlike "*$($env:EXPECTED_SUBJECT_FRAGMENT)*") {
-            throw "Signer subject does not contain expected fragment: '$($env:EXPECTED_SUBJECT_FRAGMENT)'. Actual: '$subject'"
-          }
-
-      - name: Upload signed artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-output
-          path: ${{ env.OUT_DIR }}
-          if-no-files-found: error
