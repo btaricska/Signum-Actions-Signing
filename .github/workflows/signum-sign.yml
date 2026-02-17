@@ -1,10 +1,9 @@
-# .github/workflows/windows-signing-with-keyfactor-agent.yml
 name: Windows Code Signing (Keyfactor Agent)
 
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
 
 permissions:
   contents: read
@@ -12,17 +11,20 @@ permissions:
 jobs:
   sign:
     runs-on: windows-latest
+
     env:
       OUT_DIR: signed-output
-
-      # We'll create a random file every run so you never block on repo paths
       FILE_TO_SIGN: file-to-sign.bin
 
-      # Agent MSI
+      # Agent download/install
       MSI_LANGUAGE: en-US
+      MSI_PATH: kf-agent.msi
+      MSI_LOG:  kf-agent-install.log
+
+      # Use your working public MSI URL (or swap to secrets.KF_AGENT_MSI_URL)
       KF_AGENT_MSI_URL: https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi
 
-      # Signum / Keyfactor connection (store these as secrets)
+      # Keyfactor / Signum connection (store these as secrets)
       SIGNUM_HOSTNAME:  ${{ secrets.SIGNUM_HOSTNAME }}
       SIGNUM_CLIENTID:  ${{ secrets.SIGNUM_CLIENTID }}
       SIGNUM_USERNAME:  ${{ secrets.SIGNUM_USERNAME }}
@@ -32,66 +34,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show PowerShell
+      - name: Prepare output folder
         shell: pwsh
         run: |
-          $PSVersionTable.PSVersion
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path $env:OUT_DIR | Out-Null
 
-      - name: Prepare output + create random file to sign
+      - name: Create random file to sign
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
           $out = Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-
           $file = Join-Path $out $env:FILE_TO_SIGN
-          $bytes = New-Object byte[] 4096
-          (New-Object System.Random).NextBytes($bytes)
+
+          # 32KB random payload
+          $bytes = New-Object byte[] (32KB)
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
           [System.IO.File]::WriteAllBytes($file, $bytes)
 
           Write-Host "Created file to sign: $file"
-          Get-Item $file | Format-List FullName,Length
+          "FILE_TO_SIGN=$($env:FILE_TO_SIGN)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Download agent MSI (curl)
+      - name: Download Keyfactor Agent MSI (curl)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
-          $msi = Join-Path $env:GITHUB_WORKSPACE "kf-agent.msi"
-          $log = Join-Path $env:GITHUB_WORKSPACE "kf-agent-install.log"
+          Write-Host "Downloading MSI with curl..."
+          curl -L -o "$env:MSI_PATH" "$env:KF_AGENT_MSI_URL"
 
-          "MSI_PATH=$msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "MSI_LOG=$log"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if (-not (Test-Path $env:MSI_PATH)) { throw "MSI download failed: $env:MSI_PATH" }
+          Write-Host "Downloaded MSI: $env:MSI_PATH ($((Get-Item $env:MSI_PATH).Length) bytes)"
 
-          Write-Host "Downloading: $env:KF_AGENT_MSI_URL"
-          curl -L -o "$msi" "$env:KF_AGENT_MSI_URL"
-
-          if (-not (Test-Path $msi)) { throw "MSI download failed." }
-          Write-Host "Downloaded MSI size: $((Get-Item $msi).Length) bytes"
-
-      - name: Install agent MSI (pass required properties)
+      - name: Install Keyfactor Agent MSI (msiexec)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
-          if (-not (Test-Path $env:MSI_PATH)) { throw "MSI not found: $env:MSI_PATH" }
-          if ([string]::IsNullOrWhiteSpace($env:SIGNUM_HOSTNAME)) { throw "Missing SIGNUM_HOSTNAME" }
-          if ([string]::IsNullOrWhiteSpace($env:SIGNUM_CLIENTID)) { throw "Missing SIGNUM_CLIENTID" }
+          foreach ($n in @("SIGNUM_HOSTNAME","SIGNUM_CLIENTID")) {
+            $v = (Get-Item -Path "Env:$n" -ErrorAction SilentlyContinue).Value
+            if ([string]::IsNullOrWhiteSpace($v)) { throw "Missing required secret/env var: $n" }
+          }
 
           $rtPrimary = $env:SIGNUM_HOSTNAME
           $clientId  = $env:SIGNUM_CLIENTID
           $lang      = if ([string]::IsNullOrWhiteSpace($env:MSI_LANGUAGE)) { "en-US" } else { $env:MSI_LANGUAGE }
 
-          Write-Host "Installing MSI:"
-          Write-Host "  MSI:      $env:MSI_PATH"
-          Write-Host "  RTPRIMARY:$rtPrimary"
-          Write-Host "  CLIENTID: $clientId"
-          Write-Host "  LANGUAGE: $lang"
-          Write-Host "  LOG:      $env:MSI_LOG"
+          Write-Host "Installing MSI..."
+          Write-Host "  RTPRIMARY=$rtPrimary"
+          Write-Host "  CLIENTID=$clientId"
+          Write-Host "  LANGUAGE=$lang"
 
           $args = @(
             "/i", "`"$env:MSI_PATH`"",
@@ -109,77 +105,82 @@ jobs:
           if ($p.ExitCode -ne 0) {
             if (Test-Path $env:MSI_LOG) {
               Write-Host "---- Tail(300): $env:MSI_LOG ----"
-              Get-Content $env:MSI_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
+              Get-Content -Path $env:MSI_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
             }
             throw "MSI install failed (exit code $($p.ExitCode))."
           }
 
-      - name: Configure agent (run keyfactor-setup.exe if present)
+      - name: Locate optional agent tools (FYI)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
-          foreach ($n in @("SIGNUM_HOSTNAME","SIGNUM_CLIENTID","SIGNUM_USERNAME","SIGNUM_PASSWORD")) {
-            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$n" -ErrorAction SilentlyContinue).Value)) {
-              throw "Missing required env var: $n"
-            }
+          $roots = @(
+            "$env:ProgramFiles\KeyFactor",
+            "${env:ProgramFiles(x86)}\KeyFactor",
+            "$env:ProgramFiles\Keyfactor",
+            "${env:ProgramFiles(x86)}\Keyfactor"
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+          foreach ($r in $roots) {
+            Write-Host "Listing: $r"
+            Get-ChildItem -Path $r -ErrorAction SilentlyContinue | Select-Object Name, FullName | Format-Table -AutoSize
           }
 
-          $setup = @(
-            "C:\Program Files\KeyFactor\keyfactor-setup.exe",
-            "C:\Program Files (x86)\KeyFactor\keyfactor-setup.exe"
+          $cfg = @(
+            "$env:ProgramFiles\KeyFactor\rtkspconfig.exe",
+            "${env:ProgramFiles(x86)}\KeyFactor\rtkspconfig.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
-          if ($setup) {
-            Write-Host "Using keyfactor-setup: $setup"
-            & $setup `
-              hostname="$env:SIGNUM_HOSTNAME" `
-              clientid="$env:SIGNUM_CLIENTID" `
-              username="$env:SIGNUM_USERNAME" `
-              password="$env:SIGNUM_PASSWORD" `
-              loglevel=HIGH logtype=FILE
+          if ($cfg) {
+            Write-Host "Found config tool: $cfg"
           } else {
-            Write-Host "keyfactor-setup.exe not found (continuing)."
-            Write-Host "Installed folder listing (if exists):"
-            if (Test-Path "C:\Program Files\KeyFactor") {
-              Get-ChildItem "C:\Program Files\KeyFactor" | Select-Object Name,Length,LastWriteTime | Format-Table -AutoSize
-            }
+            Write-Host "No config tool found (continuing)."
           }
 
-      - name: Restart Keyfactor-ish service (safe; ignore permission denied)
+      - name: Ensure signtool exists
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
+          $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
-          $svcs = @()
-          try {
-            $svcs = Get-CimInstance Win32_Service |
-              Where-Object { $_.Name -match 'keyfactor|signum|redtrust|evolium' -or $_.DisplayName -match 'keyfactor|signum|redtrust|evolium' } |
-              Sort-Object Name
-          } catch {
-            Write-Host "Service enumeration failed (continuing): $($_.Exception.Message)"
+          function Find-SignTool {
+            $candidates = @(
+              "$env:ProgramFiles (x86)\Windows Kits\10\bin\*\x64\signtool.exe",
+              "$env:ProgramFiles (x86)\Windows Kits\10\bin\*\x86\signtool.exe",
+              "$env:ProgramFiles\Windows Kits\10\bin\*\x64\signtool.exe"
+            )
+            foreach ($pat in $candidates) {
+              $hit = Get-ChildItem -Path $pat -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+              if ($hit) { return $hit.FullName }
+            }
+            return $null
           }
 
-          if (-not $svcs -or $svcs.Count -eq 0) {
-            Write-Host "No matching services found (continuing)."
-            exit 0
+          $signtool = Find-SignTool
+          if (-not $signtool) {
+            Write-Host "signtool not found; installing Windows 10 SDK Signing tools via Chocolatey..."
+            if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
+              Write-Host "Installing Chocolatey..."
+              Set-ExecutionPolicy Bypass -Scope Process -Force
+              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+              Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+            }
+
+            choco install windows-sdk-10-version-2004-windbg -y --no-progress
+
+            $signtool = Find-SignTool
           }
 
-          $svc = $svcs | Select-Object -First 1
-          Write-Host "Restarting: $($svc.Name) ($($svc.DisplayName))"
+          if (-not $signtool) { throw "signtool.exe still not found after install attempt." }
 
-          try {
-            Restart-Service -Name $svc.Name -Force -ErrorAction Stop
-            Start-Sleep -Seconds 3
-            $st = (Get-Service -Name $svc.Name -ErrorAction Stop).Status
-            Write-Host "Status: $st"
-          } catch {
-            Write-Host "Could not restart service (continuing): $($_.Exception.Message)"
-          }
+          "SIGNTOOL=$signtool" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using signtool: $signtool"
 
-      - name: Find Code Signing certs (LocalMachine\My) -> cert_data.json + env thumbprint
+      - name: Find a Code Signing cert (LocalMachine\My) and choose thumbprint
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -200,7 +201,9 @@ jobs:
                 Subject    = $_.Subject
               }
             } |
-            Sort-Object HasKey -Descending, NotAfter -Descending
+            Sort-Object -Property `
+              @{ Expression = 'HasKey';   Descending = $true }, `
+              @{ Expression = 'NotAfter'; Descending = $true }
 
           $data | ConvertTo-Json -Depth 100 | Out-File -FilePath 'cert_data.json' -Encoding utf8
           Write-Host "=== cert_data.json ==="
@@ -218,38 +221,29 @@ jobs:
           Write-Host "Chosen CN: $($chosen.CN)"
           Write-Host "HasPrivateKey: $($chosen.HasKey)"
 
-      - name: Locate signtool.exe (Windows Kits) + sign with chosen thumbprint
+      - name: Sign the random file (use chosen thumbprint)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
 
+          $signtool = $env:SIGNTOOL
+          if (-not (Test-Path $signtool)) { throw "signtool missing at: $signtool" }
+
+          $file = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR) $env:FILE_TO_SIGN
+          if (-not (Test-Path $file)) { throw "File to sign not found: $file" }
+
           if ([string]::IsNullOrWhiteSpace($env:SIGNING_THUMBPRINT)) {
             throw "SIGNING_THUMBPRINT not set."
           }
 
-          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-          if (-not $signtool) {
-            $candidates = @(
-              "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe",
-              "C:\Program Files\Windows Kits\10\bin\*\x64\signtool.exe"
-            )
-            $signtool = Get-ChildItem -Path $candidates -ErrorAction SilentlyContinue |
-              Sort-Object FullName -Descending |
-              Select-Object -First 1 -ExpandProperty FullName
-          }
-          if (-not $signtool -or -not (Test-Path $signtool)) {
-            throw "signtool.exe not found."
-          }
-
-          $file = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:OUT_DIR) $env:FILE_TO_SIGN
-          if (-not (Test-Path $file)) { throw "File not found to sign: $file" }
-
-          Write-Host "Using signtool: $signtool"
           Write-Host "Signing: $file"
-          Write-Host "Thumbprint: $env:SIGNING_THUMBPRINT"
-
-          & $signtool sign /sha1 $env:SIGNING_THUMBPRINT /fd sha256 /tr http://timestamp.digicert.com /td sha256 "$file"
+          & $signtool sign `
+            /sha1 $env:SIGNING_THUMBPRINT `
+            /fd sha256 `
+            /tr http://timestamp.digicert.com `
+            /td sha256 `
+            "$file"
 
       - name: Verify signature
         shell: pwsh
@@ -264,11 +258,10 @@ jobs:
           if ($sig.SignerCertificate) {
             Write-Host "Subject: $($sig.SignerCertificate.Subject)"
             Write-Host "Thumbprint: $($sig.SignerCertificate.Thumbprint)"
+            Write-Host "NotAfter: $($sig.SignerCertificate.NotAfter)"
           }
 
-          if ($sig.Status -ne "Valid") {
-            throw "Signature not valid: $($sig.Status)"
-          }
+          if ($sig.Status -ne "Valid") { throw "Signature is not valid: $($sig.Status)" }
 
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
