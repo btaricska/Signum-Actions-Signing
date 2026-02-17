@@ -1,7 +1,12 @@
-name: Sign File via Signum Agent + PKCS11
+name: Sign File via Signum Agent (Windows, KSP/CSP)
 
 on:
   workflow_dispatch:
+    inputs:
+      file_to_sign:
+        description: "Path to file to sign (relative to repo root)"
+        required: false
+        default: "hello-world-app.exe"
   push:
     branches: ["main"]
 
@@ -9,17 +14,14 @@ permissions:
   contents: read
 
 jobs:
-  sign:
-    # "older version" runner
-    runs-on: ubuntu-20.04
+  sign-windows:
+    runs-on: windows-2022
 
     env:
-      KF_CFG_PATH: "/etc/keyfactor/config"
+      # Paths / outputs
       OUT_DIR: "signed-output"
-      FILE_TO_SIGN: "file.bin"
-      SIG_OUT: "file.bin.sig"
-
-      # Optional subject fragment to bias selection (if present in pkcs11-tool output)
+      FILE_TO_SIGN: ${{ github.event.inputs.file_to_sign || 'hello-world-app.exe' }}
+      SIG_OUT_SUFFIX: ".sig"            # for non-Authenticode signatures if used
       EXPECTED_SUBJECT_FRAGMENT: "CN=CodeSigningCertificate"
 
     steps:
@@ -27,307 +29,202 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate required secrets
-        shell: bash
+        shell: pwsh
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
-          USER_PIN: ${{ secrets.USER_PIN }}
+          KF_AGENT_MSI_URL: ${{ secrets.KF_AGENT_MSI_URL }}
+          CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT || '' }}
         run: |
-          set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD KF_AGENT_DEB_URL USER_PIN; do
-            if [ -z "${!s:-}" ]; then
-              echo "❌ Missing secret: $s"
-              exit 1
-            fi
-          done
-          echo "✅ Secrets validated"
+          $required = @('SIGNUM_HOSTNAME','SIGNUM_CLIENTID','SIGNUM_USERNAME','SIGNUM_PASSWORD','KF_AGENT_MSI_URL')
+          $missing = @()
+          foreach ($r in $required) {
+            if (-not (Get-ChildItem env:$r).Value) { $missing += $r }
+          }
+          if ($missing.Count -gt 0) { Write-Error "Missing secrets: $($missing -join ', ')" ; exit 1 }
+          Write-Host "✅ Secrets validated"
 
-      - name: Install prerequisites
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            opensc opensc-pkcs11 pcscd libpcsclite1 libccid \
-            curl ca-certificates \
-            gnutls-bin
-
-          command -v pkcs11-tool
-          pkcs11-tool --version || true
-          command -v p11tool || true
-          p11tool --version || true
-
-      - name: Create random file to sign
-        shell: bash
-        run: |
-          set -euo pipefail
-          head -c 4096 /dev/urandom > "$FILE_TO_SIGN"
-          echo "✅ Created $FILE_TO_SIGN"
-          ls -la "$FILE_TO_SIGN"
-          sha256sum "$FILE_TO_SIGN" || true
-
-      - name: Download & install Keyfactor Agent (.deb)
-        shell: bash
+      - name: Install Keyfactor Agent (MSI)
+        shell: pwsh
         env:
-          KF_AGENT_DEB_URL: ${{ secrets.KF_AGENT_DEB_URL }}
+          KF_AGENT_MSI_URL: ${{ secrets.KF_AGENT_MSI_URL }}
         run: |
-          set -euo pipefail
-          AGENT_URL="$(printf "%s" "${KF_AGENT_DEB_URL:-}" | tr -d '\r' | xargs)"
-          if [ -z "${AGENT_URL:-}" ]; then
-            echo "❌ KF_AGENT_DEB_URL is empty"
-            exit 1
-          fi
-          if ! printf "%s" "$AGENT_URL" | grep -qE '^https?://'; then
-            echo "❌ KF_AGENT_DEB_URL must be ONLY the URL (one line, no quotes)."
-            exit 1
-          fi
+          $url = $env:KF_AGENT_MSI_URL.Trim()
+          if (-not ($url -match '^https?://')) { Write-Error "KF_AGENT_MSI_URL looks invalid: $url" ; exit 1 }
+          $msi = Join-Path $env:TEMP 'keyfactor-agent.msi'
+          Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+          Write-Host "Downloaded to $msi"
+          # install silently
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$msi`" /qn /norestart"
+          Write-Host "Installed MSI (dpkg equivalent on Windows)."
 
-          echo "⬇️ Downloading agent from:"
-          echo "$AGENT_URL"
-          curl -fsSL -o kf-agent.deb "$AGENT_URL"
-
-          echo "📦 Installing agent..."
-          sudo dpkg -i kf-agent.deb || (sudo apt-get install -f -y && sudo dpkg -i kf-agent.deb)
-
-          dpkg -l | grep -i keyfactor || true
-
-      - name: Configure agent (keyfactor-setup)
-        shell: bash
+      - name: Configure agent (keyfactor-setup) and start service
+        shell: pwsh
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
-          set -euo pipefail
+          # keyfactor-setup may be installed to PATH by MSI; if not, locate it.
+          $kf = Get-Command keyfactor-setup -ErrorAction SilentlyContinue
+          if (-not $kf) {
+            # common install path - adjust if your MSI installs elsewhere
+            $possible = @(
+              "C:\Program Files\Keyfactor\Agent\keyfactor-setup.exe",
+              "C:\Program Files\Keyfactor\Service\keyfactor-setup.exe"
+            )
+            foreach ($p in $possible) { if (Test-Path $p) { $kf = $p; break } }
+          } else {
+            $kf = $kf.Path
+          }
 
-          sudo keyfactor-setup \
-            hostname="$SIGNUM_HOSTNAME" \
-            clientid="$SIGNUM_CLIENTID" \
-            username="$SIGNUM_USERNAME" \
-            password="$SIGNUM_PASSWORD" \
-            loglevel=HIGH logtype=FILE
+          if (-not $kf) {
+            Write-Host "⚠️ keyfactor-setup not found in PATH; attempting to continue (agent may auto-configure)."
+          } else {
+            Write-Host "Using keyfactor-setup: $kf"
+            & $kf `
+              hostname="$env:SIGNUM_HOSTNAME" `
+              clientid="$env:SIGNUM_CLIENTID" `
+              username="$env:SIGNUM_USERNAME" `
+              password="$env:SIGNUM_PASSWORD" `
+              loglevel=HIGH logtype=FILE
+          }
 
-      - name: Pick free port + write Keyfactor config + restart service
-        shell: bash
+          # Restart/start the Windows service (service name may vary; try KeyfactorService)
+          $svcName = 'KeyfactorService'
+          if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
+            Restart-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Write-Host "Service $svcName status: $(Get-Service -Name $svcName).Status"
+          } else {
+            Write-Host "⚠️ Service $svcName not found; agent may install under different name — listing services:"
+            Get-Service | Where-Object {$_.Name -like '*Keyfact*' -or $_.DisplayName -like '*Keyfact*'} | Format-Table -AutoSize
+          }
+
+      - name: Wait for agent service to be stable
+        shell: pwsh
         run: |
-          set -euo pipefail
-
-          PORT=$(comm -23 <(seq 50000 60000 | sort) <(ss -ltn | awk 'NR>1{print $4}' | awk -F: '{print $NF}' | sort -u) | shuf -n 1)
-          echo "✅ Using port $PORT"
-
-          echo -e "port=${PORT}\nloglevel=HIGH\nlogtype=FILE" | sudo tee "$KF_CFG_PATH" >/dev/null
-          echo "✅ /etc/keyfactor/config:"
-          sudo cat "$KF_CFG_PATH"
-
-          sudo systemctl daemon-reload || true
-          sudo systemctl enable KeyfactorService || true
-          sudo systemctl restart KeyfactorService
-
-      - name: Wait for KeyfactorService to be stable (no restarts)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "⏳ Waiting for KeyfactorService to be stable..."
-          STABLE_SECONDS=15
-          DEADLINE=$((SECONDS+180))
-
-          while [ $SECONDS -lt $DEADLINE ]; do
-            if systemctl is-active --quiet KeyfactorService; then
-              OK=1
-              for i in $(seq 1 $STABLE_SECONDS); do
-                if ! systemctl is-active --quiet KeyfactorService; then
-                  OK=0
-                  break
-                fi
-                sleep 1
-              done
-
-              if [ "$OK" -eq 1 ]; then
-                echo "✅ KeyfactorService stayed active for ${STABLE_SECONDS}s"
-                echo "✅ Status:"
-                sudo systemctl status KeyfactorService --no-pager || true
-                echo "✅ Recent logs:"
-                sudo journalctl -u KeyfactorService -n 120 --no-pager || true
-                echo "✅ Listening ports:"
-                ss -ltnp || true
-                exit 0
-              fi
-            fi
-
-            echo "…service not stable yet; last 30 log lines:"
-            sudo journalctl -u KeyfactorService -n 30 --no-pager || true
-            sleep 2
-          done
-
-          echo "❌ KeyfactorService never became stable"
-          sudo systemctl status KeyfactorService --no-pager || true
-          sudo journalctl -u KeyfactorService -n 300 --no-pager || true
-          exit 1
-
-      - name: Resolve PKCS#11 module path
-        id: pkcs11
-        shell: bash
-        run: |
-          set -euo pipefail
-          FOUND=""
-
-          if [ -f /etc/keyfactor/keyfactor.module ]; then
-            FOUND="$(awk -F'"' '/module:/ {print $2; exit}' /etc/keyfactor/keyfactor.module || true)"
-          fi
-
-          if [ -z "${FOUND:-}" ]; then
-            for p in \
-              /usr/local/keyfactor/pkcs11/libkeyfactorpkcs11.so \
-              /usr/lib/libkeyfactorpkcs11.so \
-              /usr/lib/x86_64-linux-gnu/libkeyfactorpkcs11.so \
-              /usr/lib64/libkeyfactorpkcs11.so; do
-              if [ -f "$p" ]; then FOUND="$p"; break; fi
-            done
-          fi
-
-          if [ -z "${FOUND:-}" ]; then
-            FOUND="$(sudo find / -type f -name 'libkeyfactorpkcs11.so' 2>/dev/null | head -n 1 || true)"
-          fi
-
-          if [ -z "${FOUND:-}" ]; then
-            echo "❌ libkeyfactorpkcs11.so not found"
+          $svcName = 'KeyfactorService'
+          $deadline = (Get-Date).AddMinutes(3)
+          while ((Get-Date) -lt $deadline) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') {
+              # require continuous run for 10s
+              Start-Sleep -Seconds 10
+              $svc2 = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+              if ($svc2 -and $svc2.Status -eq 'Running') { Write-Host "✅ $svcName stable and running"; break }
+            }
+            Start-Sleep -Seconds 2
+          }
+          if (-not (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
+            Write-Error "$svcName not found; check installation and logs"; exit 1
+          }
+          if ((Get-Service -Name $svcName).Status -ne 'Running') {
+            Write-Error "$svcName not running after wait; dumping last event logs"
+            Get-WinEvent -MaxEvents 200 -FilterHashtable @{LogName='Application'} | Select-Object -First 20
             exit 1
-          fi
+          }
 
-          echo "✅ PKCS#11 module: $FOUND"
-          ls -la "$FOUND" || true
-          echo "module=$FOUND" >> "$GITHUB_OUTPUT"
-
-      - name: Token inventory (OS-specific)
-        shell: bash
-        env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
+      - name: Verify file to sign exists
+        shell: pwsh
         run: |
-          set -euo pipefail
+          if (-not (Test-Path -Path $env:FILE_TO_SIGN)) { Write-Error "File to sign not found: $env:FILE_TO_SIGN"; exit 1 }
+          Write-Host "Signing: $env:FILE_TO_SIGN"
+          Get-Item $env:FILE_TO_SIGN | Format-List
 
-          echo "=== OS release ==="
-          cat /etc/os-release || true
-
-          . /etc/os-release || true
-          MAJOR="${VERSION_ID%%.*}"
-
-          if [ "${MAJOR:-0}" -le 20 ]; then
-            echo "✅ Ubuntu ${VERSION_ID} (older): using pkcs11-tool -O"
-            pkcs11-tool --module "$MODULE_PATH" -O || true
-          else
-            echo "✅ Ubuntu ${VERSION_ID} (22.04+): using p11tool --list-tokens"
-            p11tool --list-tokens --provider "$MODULE_PATH" || true
-          fi
-
-      - name: Wait for PKCS#11 provider to initialize (C_Initialize must succeed)
-        shell: bash
+      - name: Find certificate thumbprint (by secret or subject)
+        id: find_cert
+        shell: pwsh
         env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-        run: |
-          set -euo pipefail
-
-          echo "⏳ Waiting for PKCS#11 provider to initialize..."
-          for i in {1..120}; do
-            if pkcs11-tool --module "$MODULE_PATH" --list-slots >/dev/null 2>&1; then
-              echo "✅ PKCS#11 initialized"
-              pkcs11-tool --module "$MODULE_PATH" --list-slots --verbose || true
-              exit 0
-            fi
-            sleep 1
-          done
-
-          echo "❌ PKCS#11 did not initialize"
-          pkcs11-tool --module "$MODULE_PATH" --list-slots --verbose || true
-          sudo journalctl -u KeyfactorService -n 200 --no-pager || true
-          exit 1
-
-      - name: List all certs + keys
-        shell: bash
-        env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-          USER_PIN: ${{ secrets.USER_PIN }}
-        run: |
-          set -euo pipefail
-
-          echo "=== CERTS (slot 0) ==="
-          pkcs11-tool --module "$MODULE_PATH" --slot 0 --list-objects --type cert || true
-
-          echo "=== PUBKEYS (slot 0) ==="
-          pkcs11-tool --module "$MODULE_PATH" --slot 0 --list-objects --type pubkey --verbose || true
-
-          echo "=== PRIVKEYS (slot 0, login) ==="
-          pkcs11-tool --module "$MODULE_PATH" --slot 0 --login --pin "$USER_PIN" --list-objects --type privkey --verbose || true
-
-      - name: Choose cert ID + sign (pkcs11-tool)
-        shell: bash
-        env:
-          MODULE_PATH: ${{ steps.pkcs11.outputs.module }}
-          USER_PIN: ${{ secrets.USER_PIN }}
+          CERT_THUMBPRINT_SECRET: ${{ secrets.CERT_THUMBPRINT || '' }}
           EXPECTED_SUBJECT_FRAGMENT: ${{ env.EXPECTED_SUBJECT_FRAGMENT }}
         run: |
-          set -euo pipefail
+          # Prefer explicit thumbprint via SECRET
+          if ($env:CERT_THUMBPRINT_SECRET -and $env:CERT_THUMBPRINT_SECRET.Trim() -ne "") {
+            $tp = $env:CERT_THUMBPRINT_SECRET.Trim().Replace(' ','').ToUpper()
+            Write-Host "✅ Using thumbprint from secret: $tp"
+            echo "thumbprint=$tp" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
 
-          CERTS="$(pkcs11-tool --module "$MODULE_PATH" --slot 0 --list-objects --type cert 2>&1)"
-          echo "$CERTS"
+          # Search LocalMachine\My then CurrentUser\My for subject fragment
+          $frag = $env:EXPECTED_SUBJECT_FRAGMENT
+          Write-Host "Searching cert stores for subject containing: $frag"
 
-          MATCH_BLOCK="$(printf "%s\n" "$CERTS" | awk '
-            BEGIN{RS="Certificate Object"; ORS=""}
-            NR>1{
-              block="Certificate Object"$0
-              if (ENVIRON["EXPECTED_SUBJECT_FRAGMENT"] != "" && block ~ ENVIRON["EXPECTED_SUBJECT_FRAGMENT"]) { print block; exit }
-            }')"
+          $found = $null
+          $stores = @('LocalMachine','CurrentUser')
+          foreach ($s in $stores) {
+            $certs = Get-ChildItem -Path Cert:\$s\My -ErrorAction SilentlyContinue
+            foreach ($c in $certs) {
+              if ($c.Subject -like "*$frag*") {
+                $found = $c
+                break
+              }
+            }
+            if ($found) { break }
+          }
 
-          if [ -n "${MATCH_BLOCK:-}" ]; then
-            CERT_ID="$(echo "$MATCH_BLOCK" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r")"
-            echo "✅ Found matching cert for subject fragment: $EXPECTED_SUBJECT_FRAGMENT"
-          else
-            CERT_ID="$(echo "$CERTS" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r")"
-            echo "ℹ️ No subject match; using first cert ID"
-          fi
+          if (-not $found) {
+            # fallback: list a few certs so logs show what is present
+            Write-Host "⚠️ No cert matched subject fragment. Available cert subjects (sample):"
+            Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host $_.Subject }
+            Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host $_.Subject }
+            Write-Error "No certificate found matching subject fragment. Set secrets.CERT_THUMBPRINT to a known thumbprint if needed." ; exit 1
+          }
 
-          if [ -z "${CERT_ID:-}" ]; then
-            echo "❌ Could not select a certificate ID"
-            exit 1
-          fi
-          echo "✅ Using cert/key ID: $CERT_ID"
+          $tp = $found.Thumbprint.Replace(' ','').ToUpper()
+          Write-Host "✅ Found cert: $($found.Subject)  Thumbprint: $tp"
+          echo "thumbprint=$tp" >> $env:GITHUB_OUTPUT
 
-          echo "🔑 Ensuring private keys are visible (login)..."
-          PRIV="$(pkcs11-tool --module "$MODULE_PATH" --slot 0 --login --pin "$USER_PIN" --list-objects --type privkey 2>&1 || true)"
-          echo "$PRIV"
+      - name: Sign with signtool (preferred) or PowerShell fallback
+        shell: pwsh
+        env:
+          THUMBPRINT: ${{ steps.find_cert.outputs.thumbprint }}
+          TIMESTAMP_URL: ${{ secrets.TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          $thumb = $env:THUMBPRINT
+          if (-not $thumb) { Write-Error "No thumbprint available"; exit 1 }
 
-          if ! echo "$PRIV" | grep -qi "Private Key Object"; then
-            echo "❌ No private keys visible; cannot sign."
-            exit 1
-          fi
+          $file = Resolve-Path -Path $env:FILE_TO_SIGN
 
-          mkdir -p "$OUT_DIR"
-          cp -f "$FILE_TO_SIGN" "$OUT_DIR/"
+          # Try signtool (part of Windows SDK). Use /sha1 with machine store if certificate is in LocalMachine
+          $sigtool = Get-Command signtool -ErrorAction SilentlyContinue
+          if ($sigtool) {
+            Write-Host "✍️ Using signtool to sign"
+            # prefer to use machine store (LocalMachine) certificate; /sm selects LocalMachine store
+            & signtool sign /sm /s My /sha1 $thumb /tr $env:TIMESTAMP_URL /td sha256 /fd sha256 $file
+            if ($LASTEXITCODE -ne 0) { Write-Error "signtool failed with exit $LASTEXITCODE"; exit $LASTEXITCODE }
+            Write-Host "✅ signtool completed"
+          } else {
+            Write-Host "⚠️ signtool not present, falling back to Set-AuthenticodeSignature"
+            $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.Thumbprint -eq $thumb } `
+                    -ErrorAction SilentlyContinue
+            if (-not $cert) {
+              $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb } -ErrorAction SilentlyContinue
+            }
+            if (-not $cert) { Write-Error "Could not load cert by thumbprint"; exit 1 }
 
-          MECH="RSA-PKCS"
-          echo "✍️ Signing $OUT_DIR/$FILE_TO_SIGN -> $OUT_DIR/$SIG_OUT"
-          pkcs11-tool \
-            --module "$MODULE_PATH" \
-            --slot 0 \
-            --login \
-            --pin "$USER_PIN" \
-            --id "$CERT_ID" \
-            --mechanism "$MECH" \
-            --sign \
-            --input-file "$OUT_DIR/$FILE_TO_SIGN" \
-            --output-file "$OUT_DIR/$SIG_OUT"
+            # Set-AuthenticodeSignature's TimestampServer parameter takes a URL
+            $ts = $env:TIMESTAMP_URL
+            $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $cert -TimestampServer $ts
+            if ($signature.Status -ne 'Valid') {
+              Write-Warning "Signature command returned status: $($signature.Status)"
+            } else {
+              Write-Host "✅ Signed via Set-AuthenticodeSignature"
+            }
+          }
 
-          echo "✅ Output:"
-          ls -la "$OUT_DIR"
-          sha256sum "$OUT_DIR/$FILE_TO_SIGN" || true
-          sha256sum "$OUT_DIR/$SIG_OUT" || true
+          # Copy signed output to OUT_DIR for upload
+          $outdir = Join-Path $PWD $env:OUT_DIR
+          New-Item -ItemType Directory -Path $outdir -Force | Out-Null
+          Copy-Item -Path $file -Destination (Join-Path $outdir ($file | Split-Path -Leaf)) -Force
+          Get-ChildItem $outdir | Format-Table
 
-      - name: Upload artifacts
+      - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pkcs11-signed-output
-          path: signed-output/*
+          name: signed-windows-output
+          path: ${{ env.OUT_DIR }}/*
