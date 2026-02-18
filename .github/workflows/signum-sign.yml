@@ -1,4 +1,4 @@
-name: Signum Windows Agent Signing Demo
+name: Signum Windows Agent JSON Demo
 
 on:
   workflow_dispatch:
@@ -8,10 +8,26 @@ jobs:
     runs-on: windows-latest
 
     steps:
+
       # ----------------------------
-      # Create a simple EXE to sign
+      # Create JSON file (no artifacts)
       # ----------------------------
-      - name: Create Demo Console App
+      - name: Create JSON File
+        shell: pwsh
+        run: |
+          $json = @{
+              application = "Signum Demo"
+              environment = "GitHub Actions"
+              timestamp = (Get-Date).ToString("u")
+          } | ConvertTo-Json -Depth 3
+
+          Set-Content -Path demo.json -Value $json
+          Get-Content demo.json
+
+      # ----------------------------
+      # Create small EXE to sign
+      # ----------------------------
+      - name: Create Demo EXE
         shell: pwsh
         run: |
           dotnet new console -n DemoApp
@@ -21,7 +37,7 @@ jobs:
           {
               static void Main()
               {
-                  Console.WriteLine("Hello from Signum signing demo!");
+                  Console.WriteLine("Hello from Signum JSON demo!");
               }
           }
           "@
@@ -70,7 +86,7 @@ jobs:
           Start-Sleep -Seconds 5
 
       # ----------------------------
-      # Sign the EXE
+      # Sign EXE
       # ----------------------------
       - name: Sign EXE
         shell: pwsh
@@ -94,10 +110,12 @@ jobs:
             verify /pa demo.exe
 
       # ----------------------------
-      # Upload Signed File
+      # Upload Results
       # ----------------------------
-      - name: Upload Signed EXE
+      - name: Upload Files
         uses: actions/upload-artifact@v4
         with:
-          name: signed-demo
-          path: demo.exe
+          name: signum-demo-output
+          path: |
+            demo.exe
+            demo.json
