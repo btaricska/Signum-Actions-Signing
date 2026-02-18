@@ -17,11 +17,7 @@ jobs:
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
-
-      # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
-
-      # Optional: expected subject fragment to help humans confirm the right cert is present
       EXPECTED_CERT_SUBJECT: "CN=CodeSigningCertificate"
 
     steps:
@@ -46,7 +42,6 @@ jobs:
             fi
           done
           echo "✅ Secrets validated"
-          echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
       - name: Configure Docker auth
         shell: bash
@@ -88,21 +83,33 @@ jobs:
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
-          echo "⏳ Waiting for PKCS#11 module to become ready..."
+      - name: Wait for PKCS#11 token (Ubuntu 22.04+)
+        shell: bash
+        env:
+          USER_PIN: ${{ secrets.USER_PIN }}
+        run: |
+          set -euo pipefail
+
+          echo "⏳ Waiting for PKCS#11 token..."
+          FOUND=0
           for i in {1..120}; do
-            if docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots >/dev/null 2>&1; then
-              echo "✅ PKCS#11 module is ready"
-              exit 0
+            TOKENS="$(docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" 2>/dev/null || true)"
+            if echo "$TOKENS" | grep -q "token:"; then
+              echo "✅ PKCS#11 token found"
+              FOUND=1
+              break
             fi
             sleep 1
           done
 
-          echo "❌ PKCS#11 module never became ready"
-          echo "---- docker logs (tail) ----"
-          docker logs "$CONTAINER_NAME" | tail -n 300 || true
-          echo "---- pkcs11-tool verbose ----"
-          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose || true
-          exit 1
+          if [ "$FOUND" -ne 1 ]; then
+            echo "❌ No PKCS#11 token appeared after waiting 2 minutes"
+            echo "---- docker logs (tail) ----"
+            docker logs "$CONTAINER_NAME" | tail -n 100
+            exit 1
+          fi
+
+          echo "$TOKENS"
 
       - name: Create JSON file to sign
         shell: bash
@@ -122,88 +129,29 @@ jobs:
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          echo "✅ Verifying input file exists inside the container..."
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
+          echo "🔍 Listing all tokens and objects via p11tool..."
+          docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE"
+          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-objects
 
-          echo "🔍 Listing slots (verbose)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose
-
+          # Pick first private key (via pkcs11-tool, compatible for signing)
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
             | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
 
-          if [ -z "${SLOT:-}" ]; then
-            echo "❌ No slots found"
-            exit 1
-          fi
-          echo "✅ Using slot: $SLOT"
+          PRIV_BLOCK="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --slot "$SLOT" \
+            --login --pin "$USER_PIN" --list-objects --type privkey | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
 
-          echo "🔎 Listing ALL objects in slot $SLOT (no login)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects || true
-
-          echo "🔍 Listing certificates in slot $SLOT..."
-          CERT_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects --type cert 2>&1 || true)"
-          echo "$CERT_OUT"
-
-          if echo "$CERT_OUT" | grep -q "Certificate Object"; then
-            echo "✅ At least one certificate object is visible via PKCS#11"
-            if [ -n "${EXPECTED_CERT_SUBJECT:-}" ]; then
-              echo "ℹ️ If available, confirm expected subject fragment: $EXPECTED_CERT_SUBJECT"
-            fi
-          else
-            echo "⚠️ No certificate objects visible via PKCS#11"
-          fi
-
-          echo "🔍 Listing public keys in slot $SLOT..."
-          PUB_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects --type pubkey 2>&1 || true)"
-          echo "$PUB_OUT"
-
-          echo "🔑 Listing private keys in slot $SLOT (with login)..."
-          PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --login \
-            --pin "$USER_PIN" \
-            --list-objects --type privkey 2>&1 || true)"
-          echo "$PRIV_OUT"
-
-          # Hard fail unless we see an actual Private Key Object
-          if ! echo "$PRIV_OUT" | grep -q "Private Key Object"; then
-            echo "❌ No private key objects visible in slot $SLOT."
-            echo "➡️ The certificate may exist in Signum, but its private key is not provisioned/assigned/exposed to this agent via PKCS#11."
-            echo "➡️ Ensure the CodeSigningCertificate private key is available to this agent/user, then rerun."
-            exit 1
-          fi
-
-          echo "🔍 Selecting first private key block..."
-          KEY_BLOCK="$(printf "%s\n" "$PRIV_OUT" | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
-          if [ -z "${KEY_BLOCK:-}" ]; then
-            echo "❌ Could not parse a private key object block"
-            exit 1
-          fi
-
-          KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
-          KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
-          KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
-
-          echo "✅ Using private key ID: ${KEY_ID:-<none>}  Label: ${KEY_LABEL:-<none>}  Type: ${KEY_TYPE:-<unknown>}"
+          KEY_ID="$(echo "$PRIV_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
+          KEY_LABEL="$(echo "$PRIV_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
+          KEY_TYPE="$(echo "$PRIV_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
 
           MECH="RSA-PKCS"
           if echo "${KEY_TYPE:-}" | grep -qiE 'EC|ECDSA'; then
             MECH="ECDSA"
           fi
-          echo "ℹ️ Using mechanism: $MECH"
 
-          echo "✍️ Signing JSON file..."
-          if [ -n "${KEY_ID:-}" ]; then
+          echo "✍️ Signing JSON file using key ID: $KEY_ID, Label: $KEY_LABEL, Mechanism: $MECH"
+
+          if [ -n "$KEY_ID" ]; then
             docker exec "$CONTAINER_NAME" pkcs11-tool \
               --module "$PKCS11_MODULE" \
               --slot "$SLOT" \
@@ -214,7 +162,7 @@ jobs:
               --sign \
               --input-file "$CONTAINER_FILE" \
               --output-file "$CONTAINER_SIG"
-          elif [ -n "${KEY_LABEL:-}" ]; then
+          elif [ -n "$KEY_LABEL" ]; then
             docker exec "$CONTAINER_NAME" pkcs11-tool \
               --module "$PKCS11_MODULE" \
               --slot "$SLOT" \
@@ -226,11 +174,11 @@ jobs:
               --input-file "$CONTAINER_FILE" \
               --output-file "$CONTAINER_SIG"
           else
-            echo "❌ First private key block has neither ID nor Label; cannot select it for signing"
+            echo "❌ No usable key found for signing"
             exit 1
           fi
 
-          echo "✅ Signature written to $FILES_DIR/file.json.sig"
+          echo "✅ JSON signed: $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
 
       - name: Upload signature artifact
