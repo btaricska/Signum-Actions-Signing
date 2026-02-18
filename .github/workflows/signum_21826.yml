@@ -32,11 +32,12 @@ jobs:
           SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+          JFROG_USER: ${{ secrets.JFROG_USER }}
+          JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
           USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_USER JFROG_PASSWORD USER_PIN; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
@@ -45,14 +46,15 @@ jobs:
           echo "✅ Secrets validated"
           echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
-      - name: Configure Docker auth
+      - name: Docker login to JFrog
         shell: bash
         env:
-          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+          JFROG_USER: ${{ secrets.JFROG_USER }}
+          JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
         run: |
           set -euo pipefail
-          mkdir -p "$DOCKER_CONFIG"
-          cat > "$DOCKER_CONFIG/config.json" <<EOF
+          echo "$JFROG_PASSWORD" | docker login keyfactor.jfrog.io -u "$JFROG_USER" --password-stdin
+          echo "✅ Docker login successful"
 
       - name: Start Signum Agent container
         shell: bash
