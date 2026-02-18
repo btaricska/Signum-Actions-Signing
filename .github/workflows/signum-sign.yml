@@ -1,4 +1,4 @@
-name: Signum Simple Demo (Pinned .NET 8)
+name: Sign JSON Demo EXE
 
 on:
   workflow_dispatch:
@@ -8,111 +8,116 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # ----------------------------
+      # Setup .NET 8 SDK
+      # ----------------------------
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-    # -----------------------------------
-    # Force specific .NET version
-    # -----------------------------------
-    - name: Setup .NET 8 SDK
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
+      # ----------------------------
+      # Create EXE with JSON content
+      # ----------------------------
+      - name: Create Demo EXE from JSON secret
+        shell: pwsh
+        run: |
+          # Create a folder for demo app
+          dotnet new console -n DemoApp --framework net8.0
 
-    # -----------------------------------
-    # Create and publish EXE
-    # -----------------------------------
-    - name: Create and Publish Demo EXE
-      shell: pwsh
-      run: |
-        dotnet new console -n DemoApp --framework net8.0
+          # Read JSON from secret
+          $jsonContent = '${{ secrets.JSON_TO_SIGN }}'
 
-        Set-Content -Path .\DemoApp\Program.cs -Value @"
-        using System;
-        class Program
-        {
-            static void Main()
-            {
-                Console.WriteLine("Hello from Signum demo!");
-            }
-        }
-        "@
+          # Replace Program.cs with simple code that prints the JSON
+          Set-Content -Path .\DemoApp\Program.cs -Value @"
+          using System;
+          class Program
+          {
+              static void Main()
+              {
+                  Console.WriteLine(@\"$jsonContent\");
+              }
+          }
+          "@
 
-        dotnet publish .\DemoApp `
-            -c Release `
-            -r win-x64 `
-            --self-contained false `
-            -f net8.0 `
-            -o .\out
+          # Publish EXE to a known folder
+          dotnet publish .\DemoApp `
+              -c Release `
+              -r win-x64 `
+              --self-contained false `
+              -f net8.0 `
+              -o .\out
 
-    # -----------------------------------
-    # Download Signum Agent
-    # -----------------------------------
-    - name: Download Signum Agent
-      run: |
-        curl -L -o kf-agent.msi "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
+      # ----------------------------
+      # Download Signum Agent
+      # ----------------------------
+      - name: Download Signum Agent
+        run: |
+          curl -L -o kf-agent.msi "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
 
-    # -----------------------------------
-    # Install Signum Agent
-    # -----------------------------------
-    - name: Install Signum Agent
-      shell: pwsh
-      run: |
-        msiexec /i kf-agent.msi /passive `
-          RTPRIMARY="${{ secrets.SIGNUM_HOSTNAME }}" `
-          RTSECONDARY="${{ secrets.SIGNUM_HOSTNAME }}" `
-          CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" `
-          AuthMode="LocalUsers" `
-          AGENTMODE="SERVER" `
-          Language="en-US"
+      # ----------------------------
+      # Install Signum Agent
+      # ----------------------------
+      - name: Install Signum Agent
+        shell: pwsh
+        run: |
+          msiexec /i kf-agent.msi /passive `
+            RTPRIMARY="${{ secrets.SIGNUM_HOSTNAME }}" `
+            RTSECONDARY="${{ secrets.SIGNUM_HOSTNAME }}" `
+            CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" `
+            AuthMode="LocalUsers" `
+            AGENTMODE="SERVER" `
+            Language="en-US"
 
-    # -----------------------------------
-    # Authenticate Agent
-    # -----------------------------------
-    - name: Configure Agent Authentication
-      shell: pwsh
-      run: |
-        & "C:\Program Files\KeyFactor\rtsetup.exe" `
-          -authMode=LocalUsers `
-          -username="${{ secrets.SIGNUM_USERNAME }}" `
-          -password="${{ secrets.SIGNUM_PASSWORD }}"
+      # ----------------------------
+      # Authenticate Agent
+      # ----------------------------
+      - name: Configure Agent Authentication
+        shell: pwsh
+        run: |
+          & "C:\Program Files\KeyFactor\rtsetup.exe" `
+            -authMode=LocalUsers `
+            -username="${{ secrets.SIGNUM_USERNAME }}" `
+            -password="${{ secrets.SIGNUM_PASSWORD }}"
 
-    # -----------------------------------
-    # Restart Service
-    # -----------------------------------
-    - name: Restart RTService
-      shell: pwsh
-      run: |
-        Restart-Service RTService
-        Start-Sleep -Seconds 5
+      # ----------------------------
+      # Restart Service
+      # ----------------------------
+      - name: Restart RTService
+        shell: pwsh
+        run: |
+          Restart-Service RTService
+          Start-Sleep -Seconds 5
 
-    # -----------------------------------
-    # Sign EXE
-    # -----------------------------------
-    - name: Sign EXE
-      shell: pwsh
-      run: |
-        & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
-          sign `
-          /fd sha256 `
-          /tr http://timestamp.sectigo.com `
-          /td sha256 `
-          /sm `
-          /n "Demo" `
-          .\out\DemoApp.exe
+      # ----------------------------
+      # Sign EXE
+      # ----------------------------
+      - name: Sign EXE
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
+            sign `
+            /fd sha256 `
+            /tr http://timestamp.sectigo.com `
+            /td sha256 `
+            /sm `
+            /n "Demo" `
+            .\out\DemoApp.exe
 
-    # -----------------------------------
-    # Verify Signature
-    # -----------------------------------
-    - name: Verify Signature
-      shell: pwsh
-      run: |
-        & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
-          verify /pa .\out\DemoApp.exe
+      # ----------------------------
+      # Verify Signature
+      # ----------------------------
+      - name: Verify Signature
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
+            verify /pa .\out\DemoApp.exe
 
-    # -----------------------------------
-    # Upload Signed EXE (optional)
-    # -----------------------------------
-    - name: Upload Signed EXE
-      uses: actions/upload-artifact@v4
-      with:
-        name: signed-demo
-        path: .\out\DemoApp.exe
+      # ----------------------------
+      # Upload Signed EXE
+      # ----------------------------
+      - name: Upload Signed EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-demo-exe
+          path: .\out\DemoApp.exe
