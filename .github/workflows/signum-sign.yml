@@ -51,14 +51,14 @@ jobs:
           set -euo pipefail
           mkdir -p "$DOCKER_CONFIG"
           cat > "$DOCKER_CONFIG/config.json" <<EOF
-          {
-            "auths": {
-              "keyfactor.jfrog.io": {
-                "auth": "${JFROG_DOCKER_AUTH}"
-              }
-            }
-          }
-          EOF
+{
+  "auths": {
+    "keyfactor.jfrog.io": {
+      "auth": "${JFROG_DOCKER_AUTH}"
+    }
+  }
+}
+EOF
 
       - name: Start Signum Agent container
         shell: bash
@@ -80,19 +80,23 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
+            -e SIGNUM_LOGLEVEL=HIGH \
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
-      - name: Wait for PKCS#11 token (Ubuntu 22.04+)
+      - name: Restart KeyfactorService & wait for PKCS#11 token
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
+          echo "ℹ️ Restarting KeyfactorService inside container..."
+          docker exec "$CONTAINER_NAME" signum-util service --restart
+
           echo "⏳ Waiting for PKCS#11 token..."
           FOUND=0
-          for i in {1..120}; do
+          for i in {1..180}; do  # wait up to 3 minutes
             TOKENS="$(docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" 2>/dev/null || true)"
             if echo "$TOKENS" | grep -q "token:"; then
               echo "✅ PKCS#11 token found"
@@ -103,7 +107,7 @@ jobs:
           done
 
           if [ "$FOUND" -ne 1 ]; then
-            echo "❌ No PKCS#11 token appeared after waiting 2 minutes"
+            echo "❌ No PKCS#11 token appeared after waiting 3 minutes"
             echo "---- docker logs (tail) ----"
             docker logs "$CONTAINER_NAME" | tail -n 100
             exit 1
@@ -133,7 +137,6 @@ jobs:
           docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE"
           docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-objects
 
-          # Pick first private key (via pkcs11-tool, compatible for signing)
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
             | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
 
