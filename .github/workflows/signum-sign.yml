@@ -52,15 +52,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$DOCKER_CONFIG"
-          cat > "$DOCKER_CONFIG/config.json" <<EOF
-{
-  "auths": {
-    "keyfactor.jfrog.io": {
-      "auth": "${JFROG_DOCKER_AUTH}"
+
+          printf '%s' "{
+  \"auths\": {
+    \"keyfactor.jfrog.io\": {
+      \"auth\": \"${JFROG_DOCKER_AUTH}\"
     }
   }
-}
-EOF
+}" > "$DOCKER_CONFIG/config.json"
+
+          echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
 
       - name: Start Signum Agent container
         shell: bash
@@ -71,7 +72,6 @@ EOF
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
         run: |
           set -euo pipefail
-
           mkdir -p "$FILES_DIR"
           docker pull "$SIGNUM_AGENT_IMAGE"
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -142,18 +142,6 @@ EOF
           fi
           echo "✅ Using slot: $SLOT"
 
-          echo "🔎 Listing ALL objects in slot $SLOT (no login)..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects || true
-
-          echo "🔍 Listing certificates in slot $SLOT..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --list-objects --type cert || true
-
           echo "🔑 Listing private keys in slot $SLOT (with login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
@@ -163,13 +151,34 @@ EOF
             --list-objects --type privkey 2>&1 || true)"
           echo "$PRIV_OUT"
 
-          if ! echo "$PRIV_OUT" | grep -q "Private Key Object"; then
+          if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
             echo "❌ No private key objects visible in slot $SLOT."
             exit 1
           fi
 
-          KEY_ID="$(echo "$PRIV_OUT" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r")"
-          echo "✅ Using private key ID: ${KEY_ID:-<none>}"
+          # Try to extract a clean hex ID (no spaces)
+          KEY_ID="$(echo "$PRIV_OUT" \
+            | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
+            | head -n 1 \
+            | tr -d '\r ' \
+            | grep -E '^[0-9A-Fa-f]+$' || true)"
+
+          # Fallback: extract label
+          KEY_LABEL="$(echo "$PRIV_OUT" \
+            | sed -n 's/^[[:space:]]*label:[[:space:]]*//Ip' \
+            | head -n 1 \
+            | tr -d '\r' || true)"
+
+          if [ -n "$KEY_ID" ]; then
+            echo "✅ Using private key ID: $KEY_ID"
+            KEY_SELECTOR=(--id "$KEY_ID")
+          elif [ -n "$KEY_LABEL" ]; then
+            echo "✅ Using private key label: $KEY_LABEL"
+            KEY_SELECTOR=(--label "$KEY_LABEL")
+          else
+            echo "❌ Could not determine a private key selector (no usable ID or label found)."
+            exit 1
+          fi
 
           echo "✍️ Signing JSON file..."
           docker exec "$CONTAINER_NAME" pkcs11-tool \
@@ -177,7 +186,7 @@ EOF
             --slot "$SLOT" \
             --login \
             --pin "$USER_PIN" \
-            --id "$KEY_ID" \
+            "${KEY_SELECTOR[@]}" \
             --mechanism RSA-PKCS \
             --sign \
             --input-file "$CONTAINER_FILE" \
