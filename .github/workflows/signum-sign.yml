@@ -85,7 +85,7 @@ jobs:
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created at $FILES_DIR/file.json"
 
-      - name: Sign JSON using PKCS#11 (first available certificate)
+      - name: Sign JSON using PKCS#11 (first available certificate and key)
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
@@ -96,9 +96,9 @@ jobs:
           SIG="$FILES_DIR/file.json.sig"
 
           echo "ℹ️ Listing all certificates in PKCS#11 module..."
-          pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert
+          pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert || true
 
-          # Pick first certificate
+          # Pick first available certificate
           CERT_ID=$(pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert \
             | awk '/^ *ID:/ {print $2; exit}' | tr -d "\r")
           if [ -z "$CERT_ID" ]; then
@@ -107,7 +107,7 @@ jobs:
           fi
           echo "🔑 Using certificate ID: $CERT_ID"
 
-          # Pick first private key
+          # Pick first available private key
           PRIV_KEY_ID=$(pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type privkey --login --pin "$USER_PIN" \
             | awk '/^ *ID:/ {print $2; exit}' | tr -d "\r")
           if [ -z "$PRIV_KEY_ID" ]; then
