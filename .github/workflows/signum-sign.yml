@@ -89,9 +89,11 @@ EOF
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
+          # Restart SignumService to activate PKCS#11
           echo "ℹ️ Restarting SignumService inside container..."
           docker exec "$CONTAINER_NAME" signum-util service --restart
 
+          # Wait for PKCS#11 token
           echo "⏳ Waiting for PKCS#11 token..."
           FOUND=0
           for i in {1..120}; do
@@ -107,13 +109,7 @@ EOF
           if [ "$FOUND" -ne 1 ]; then
             echo "❌ No PKCS#11 token appeared after waiting 2 minutes"
             echo "---- docker logs (tail) ----"
-            docker logs "$CONTAINER_NAME" | tail -n 100 || true
-            echo "---- List slots inside container ----"
-            docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose || true
-            echo "---- List tokens inside container ----"
-            docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" || true
-            echo "---- Environment inside container ----"
-            docker exec "$CONTAINER_NAME" env || true
+            docker logs "$CONTAINER_NAME" | tail -n 100
             exit 1
           fi
 
