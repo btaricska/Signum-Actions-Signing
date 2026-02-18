@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           wget -O "$SIGNUM_AGENT_DEB" "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/linux/4.40.1/$SIGNUM_AGENT_DEB"
-          sudo dpkg -i "$SIGNUM_AGENT_DEB" || sudo apt-get install -f -y
+          sudo dpkg -i "$SIGNUM_AGENT_DEB" || (sudo apt-get install -f -y && sudo dpkg -i "$SIGNUM_AGENT_DEB")
 
       - name: Enable and start Keyfactor agent
         shell: bash
@@ -96,9 +96,9 @@ jobs:
           SIG="$FILES_DIR/file.json.sig"
 
           echo "ℹ️ Listing all certificates in PKCS#11 module..."
-          pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert || true
+          pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert
 
-          # Pick first available certificate
+          # Pick first certificate
           CERT_ID=$(pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert \
             | awk '/^ *ID:/ {print $2; exit}' | tr -d "\r")
           if [ -z "$CERT_ID" ]; then
@@ -107,7 +107,7 @@ jobs:
           fi
           echo "🔑 Using certificate ID: $CERT_ID"
 
-          # Pick first available private key
+          # Pick first private key
           PRIV_KEY_ID=$(pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type privkey --login --pin "$USER_PIN" \
             | awk '/^ *ID:/ {print $2; exit}' | tr -d "\r")
           if [ -z "$PRIV_KEY_ID" ]; then
