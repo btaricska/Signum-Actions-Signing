@@ -85,7 +85,6 @@ EOF
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -e SIGNUM_LOGLEVEL=HIGH \
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
