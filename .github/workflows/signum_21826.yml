@@ -53,14 +53,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$DOCKER_CONFIG"
           cat > "$DOCKER_CONFIG/config.json" <<EOF
-{
-  "auths": {
-    "keyfactor.jfrog.io": {
-      "auth": "${JFROG_DOCKER_AUTH}"
-    }
-  }
-}
-EOF
 
       - name: Start Signum Agent container
         shell: bash
