@@ -9,113 +9,124 @@ jobs:
 
     steps:
 
-      # ----------------------------
-      # Create JSON file (no artifacts)
-      # ----------------------------
-      - name: Create JSON File
-        shell: pwsh
-        run: |
-          $json = @{
-              application = "Signum Demo"
-              environment = "GitHub Actions"
-              timestamp = (Get-Date).ToString("u")
-          } | ConvertTo-Json -Depth 3
+    # -----------------------------------
+    # Create JSON file (for demo context)
+    # -----------------------------------
+    - name: Create JSON File
+      shell: pwsh
+      run: |
+        $data = @{
+            application = "Signum Demo"
+            environment = "GitHub Actions"
+            generated = (Get-Date).ToString("u")
+        } | ConvertTo-Json -Depth 3
 
-          Set-Content -Path demo.json -Value $json
-          Get-Content demo.json
+        Set-Content -Path demo.json -Value $data
+        Write-Host "Created demo.json"
+        Get-Content demo.json
 
-      # ----------------------------
-      # Create small EXE to sign
-      # ----------------------------
-      - name: Create Demo EXE
-        shell: pwsh
-        run: |
-          dotnet new console -n DemoApp
-          Set-Content -Path .\DemoApp\Program.cs -Value @"
-          using System;
-          class Program
-          {
-              static void Main()
-              {
-                  Console.WriteLine("Hello from Signum JSON demo!");
-              }
-          }
-          "@
-          dotnet publish .\DemoApp -c Release -r win-x64 --self-contained false
-          Copy-Item ".\DemoApp\bin\Release\net8.0\win-x64\publish\DemoApp.exe" .\demo.exe
+    # -----------------------------------
+    # Create small EXE to sign
+    # (no hardcoded framework paths)
+    # -----------------------------------
+    - name: Build Demo EXE
+      shell: pwsh
+      run: |
+        dotnet new console -n DemoApp
 
-      # ----------------------------
-      # Download Signum Agent
-      # ----------------------------
-      - name: Download Signum Agent
-        run: |
-          curl -L -o kf-agent.msi "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
+        Set-Content -Path .\DemoApp\Program.cs -Value @"
+        using System;
+        class Program
+        {
+            static void Main()
+            {
+                Console.WriteLine("Hello from Signum signing demo!");
+            }
+        }
+        "@
 
-      # ----------------------------
-      # Install Agent
-      # ----------------------------
-      - name: Install Signum Agent
-        shell: pwsh
-        run: |
-          msiexec /i kf-agent.msi /passive `
-            RTPRIMARY="${{ secrets.SIGNUM_HOSTNAME }}" `
-            RTSECONDARY="${{ secrets.SIGNUM_HOSTNAME }}" `
-            CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" `
-            AuthMode="LocalUsers" `
-            AGENTMODE="SERVER" `
-            Language="en-US"
+        dotnet publish .\DemoApp `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -o .\publish
 
-      # ----------------------------
-      # Authenticate Agent
-      # ----------------------------
-      - name: Configure Agent Authentication
-        shell: pwsh
-        run: |
-          & "C:\Program Files\KeyFactor\rtsetup.exe" `
-            -authMode=LocalUsers `
-            -username="${{ secrets.SIGNUM_USERNAME }}" `
-            -password="${{ secrets.SIGNUM_PASSWORD }}"
+        Copy-Item ".\publish\DemoApp.exe" ".\demo.exe"
 
-      # ----------------------------
-      # Restart Service
-      # ----------------------------
-      - name: Restart RTService
-        shell: pwsh
-        run: |
-          Restart-Service RTService
-          Start-Sleep -Seconds 5
+        Write-Host "demo.exe created"
 
-      # ----------------------------
-      # Sign EXE
-      # ----------------------------
-      - name: Sign EXE
-        shell: pwsh
-        run: |
-          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
-            sign `
-            /fd sha256 `
-            /tr http://timestamp.sectigo.com `
-            /td sha256 `
-            /sm `
-            /n "Demo" `
-            demo.exe
+    # -----------------------------------
+    # Download Signum Agent
+    # -----------------------------------
+    - name: Download Signum Agent
+      run: |
+        curl -L -o kf-agent.msi "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
 
-      # ----------------------------
-      # Verify Signature
-      # ----------------------------
-      - name: Verify Signature
-        shell: pwsh
-        run: |
-          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
-            verify /pa demo.exe
+    # -----------------------------------
+    # Install Signum Agent
+    # -----------------------------------
+    - name: Install Signum Agent
+      shell: pwsh
+      run: |
+        msiexec /i kf-agent.msi /passive `
+          RTPRIMARY="${{ secrets.SIGNUM_HOSTNAME }}" `
+          RTSECONDARY="${{ secrets.SIGNUM_HOSTNAME }}" `
+          CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" `
+          AuthMode="LocalUsers" `
+          AGENTMODE="SERVER" `
+          Language="en-US"
 
-      # ----------------------------
-      # Upload Results
-      # ----------------------------
-      - name: Upload Files
-        uses: actions/upload-artifact@v4
-        with:
-          name: signum-demo-output
-          path: |
-            demo.exe
-            demo.json
+    # -----------------------------------
+    # Authenticate Agent
+    # -----------------------------------
+    - name: Configure Agent Authentication
+      shell: pwsh
+      run: |
+        & "C:\Program Files\KeyFactor\rtsetup.exe" `
+          -authMode=LocalUsers `
+          -username="${{ secrets.SIGNUM_USERNAME }}" `
+          -password="${{ secrets.SIGNUM_PASSWORD }}"
+
+    # -----------------------------------
+    # Restart Service
+    # -----------------------------------
+    - name: Restart RTService
+      shell: pwsh
+      run: |
+        Restart-Service RTService
+        Start-Sleep -Seconds 5
+
+    # -----------------------------------
+    # Sign EXE
+    # -----------------------------------
+    - name: Sign EXE
+      shell: pwsh
+      run: |
+        & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
+          sign `
+          /fd sha256 `
+          /tr http://timestamp.sectigo.com `
+          /td sha256 `
+          /sm `
+          /n "Demo" `
+          demo.exe
+
+    # -----------------------------------
+    # Verify Signature
+    # -----------------------------------
+    - name: Verify Signature
+      shell: pwsh
+      run: |
+        & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
+          verify /pa demo.exe
+
+    # -----------------------------------
+    # Upload Results
+    # -----------------------------------
+    - name: Upload Output Files
+      uses: actions/upload-artifact@v4
+      with:
+        name: signum-demo-output
+        path: |
+          demo.exe
+          demo.json
