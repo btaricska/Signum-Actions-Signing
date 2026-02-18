@@ -1,4 +1,4 @@
-name: Sign JSON via PKCS#11
+name: Sign File via Signum Agent + PKCS11
 
 on:
   workflow_dispatch:
@@ -16,12 +16,13 @@ jobs:
       FILES_DIR: filestosign
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
       EXPECTED_CERT_SUBJECT: CN=CodeSigningCertificate
+      SIGNUM_AGENT_DEB: amd64_ubuntu22.04_keyfactor-agent-4.40.1-51ecba3-Trust.deb
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate required secrets
+      - name: Validate secrets
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
@@ -32,24 +33,49 @@ jobs:
             exit 1
           fi
           echo "✅ Secrets validated"
+          echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y wget gnupg apt-transport-https lsb-release curl opensc
-          echo "✅ Dependencies installed"
+          sudo apt-get install -y wget gnupg apt-transport-https
+          # Install .NET 8
+          wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y dotnet-runtime-8.0 aspnetcore-runtime-8.0
 
-      - name: Download and install Keyfactor Signum agent
+      - name: Install Keyfactor agent
         shell: bash
-        env:
-          SIGNUM_AGENT_DEB: amd64_ubuntu22.04_keyfactor-agent-4.40.1-51ecba3-Trust.deb
         run: |
           set -euo pipefail
           wget -O "$SIGNUM_AGENT_DEB" "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/linux/4.40.1/$SIGNUM_AGENT_DEB"
-          sudo apt-get install -f -y ./"$SIGNUM_AGENT_DEB"
-          echo "✅ Signum agent installed"
+          sudo dpkg -i "$SIGNUM_AGENT_DEB" || sudo apt-get install -f -y
+
+      - name: Enable and start Keyfactor agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ℹ️ Enabling and starting keyfactor-agent.service..."
+          sudo systemctl daemon-reload
+          sudo systemctl enable keyfactor-agent.service
+          sudo systemctl start keyfactor-agent.service
+          echo "⏳ Waiting for agent to become active..."
+          for i in {1..60}; do
+            STATUS=$(systemctl is-active keyfactor-agent.service)
+            if [ "$STATUS" = "active" ]; then
+              echo "✅ Agent service is active"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$STATUS" != "active" ]; then
+            echo "❌ Agent service did not become active"
+            sudo journalctl -u keyfactor-agent.service -n 50
+            exit 1
+          fi
 
       - name: Create JSON file to sign
         shell: bash
@@ -59,7 +85,7 @@ jobs:
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created at $FILES_DIR/file.json"
 
-      - name: Sign JSON using PKCS#11
+      - name: Sign JSON using PKCS#11 (first available certificate)
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
@@ -72,10 +98,18 @@ jobs:
           echo "ℹ️ Listing all certificates in PKCS#11 module..."
           pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert
 
-          # Pick the first available private key
+          # Pick first certificate
+          CERT_ID=$(pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert \
+            | awk '/^ *ID:/ {print $2; exit}' | tr -d "\r")
+          if [ -z "$CERT_ID" ]; then
+            echo "❌ No certificate objects found"
+            exit 1
+          fi
+          echo "🔑 Using certificate ID: $CERT_ID"
+
+          # Pick first private key
           PRIV_KEY_ID=$(pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type privkey --login --pin "$USER_PIN" \
             | awk '/^ *ID:/ {print $2; exit}' | tr -d "\r")
-
           if [ -z "$PRIV_KEY_ID" ]; then
             echo "❌ No private key available for signing"
             exit 1
@@ -93,10 +127,10 @@ jobs:
             --input-file "$FILE" \
             --output-file "$SIG"
 
-          echo "✅ JSON signed: $SIG"
+          echo "✅ JSON signed successfully: $SIG"
           ls -la "$FILES_DIR"
 
-      - name: Upload JSON and signature as artifact
+      - name: Upload signature artifact
         uses: actions/upload-artifact@v4
         with:
           name: signed-json-and-sig
