@@ -88,27 +88,19 @@ EOF
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
-          # Restart SignumService to activate PKCS#11
-          echo "ℹ️ Restarting SignumService inside container..."
-          docker exec "$CONTAINER_NAME" signum-util service --restart
-
-          # Wait for PKCS#11 token
           echo "⏳ Waiting for PKCS#11 token..."
-          FOUND=0
           for i in {1..120}; do
-            TOKENS="$(docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" 2>/dev/null || true)"
-            if echo "$TOKENS" | grep -q "token:"; then
-              echo "✅ PKCS#11 token found"
-              FOUND=1
+            if docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" >/dev/null 2>&1; then
+              echo "✅ PKCS#11 token is ready"
               break
             fi
             sleep 1
           done
 
-          if [ "$FOUND" -ne 1 ]; then
+          if ! docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" >/dev/null 2>&1; then
             echo "❌ No PKCS#11 token appeared after waiting 2 minutes"
             echo "---- docker logs (tail) ----"
-            docker logs "$CONTAINER_NAME" | tail -n 100
+            docker logs "$CONTAINER_NAME" | tail -n 300 || true
             exit 1
           fi
 
@@ -133,8 +125,9 @@ EOF
           echo "✅ Verifying input file exists inside the container..."
           docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
 
-          echo "🔍 Listing tokens..."
+          echo "🔍 Listing tokens and slots (p11tool)..."
           docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE"
+          docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose
 
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
             | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
@@ -152,10 +145,11 @@ EOF
             --list-objects || true
 
           echo "🔍 Listing certificates in slot $SLOT..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
+          CERT_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
-            --list-objects --type cert || true
+            --list-objects --type cert 2>&1 || true)"
+          echo "$CERT_OUT"
 
           echo "🔑 Listing private keys in slot $SLOT (with login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
@@ -171,20 +165,47 @@ EOF
             exit 1
           fi
 
-          KEY_ID="$(echo "$PRIV_OUT" | awk -F': *' '/^ *ID:/ {print $2; exit}' | tr -d "\r")"
-          echo "✅ Using private key ID: ${KEY_ID:-<none>}"
+          echo "🔍 Selecting first private key block..."
+          KEY_BLOCK="$(printf "%s\n" "$PRIV_OUT" | awk 'BEGIN{RS=""; ORS=""} NR==1{print; exit}')"
+          KEY_ID="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *ID:/    {print $2; exit}' | tr -d "\r")"
+          KEY_LABEL="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Label:/ {print $2; exit}' | tr -d "\r")"
+          KEY_TYPE="$(echo "$KEY_BLOCK" | awk -F': *' '/^ *Key type:/ {print $2; exit}' | tr -d "\r")"
+
+          echo "✅ Using private key ID: ${KEY_ID:-<none>}  Label: ${KEY_LABEL:-<none>}  Type: ${KEY_TYPE:-<unknown>}"
+
+          MECH="RSA-PKCS"
+          if echo "${KEY_TYPE:-}" | grep -qiE 'EC|ECDSA'; then
+            MECH="ECDSA"
+          fi
+          echo "ℹ️ Using mechanism: $MECH"
 
           echo "✍️ Signing JSON file..."
-          docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --login \
-            --pin "$USER_PIN" \
-            --id "$KEY_ID" \
-            --mechanism RSA-PKCS \
-            --sign \
-            --input-file "$CONTAINER_FILE" \
-            --output-file "$CONTAINER_SIG"
+          if [ -n "${KEY_ID:-}" ]; then
+            docker exec "$CONTAINER_NAME" pkcs11-tool \
+              --module "$PKCS11_MODULE" \
+              --slot "$SLOT" \
+              --login \
+              --pin "$USER_PIN" \
+              --id "$KEY_ID" \
+              --mechanism "$MECH" \
+              --sign \
+              --input-file "$CONTAINER_FILE" \
+              --output-file "$CONTAINER_SIG"
+          elif [ -n "${KEY_LABEL:-}" ]; then
+            docker exec "$CONTAINER_NAME" pkcs11-tool \
+              --module "$PKCS11_MODULE" \
+              --slot "$SLOT" \
+              --login \
+              --pin "$USER_PIN" \
+              --label "$KEY_LABEL" \
+              --mechanism "$MECH" \
+              --sign \
+              --input-file "$CONTAINER_FILE" \
+              --output-file "$CONTAINER_SIG"
+          else
+            echo "❌ First private key block has neither ID nor Label; cannot sign"
+            exit 1
+          fi
 
           echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
