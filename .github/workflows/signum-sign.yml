@@ -16,12 +16,13 @@ jobs:
       - name: Build Demo EXE
         shell: pwsh
         run: |
+          # Create console app
           dotnet new console -n DemoApp --framework net8.0
 
           # Read JSON secret correctly
           $jsonContent = "${{ secrets.JSON_TO_SIGN }}"
 
-          # Replace Program.cs
+          # Replace Program.cs with JSON output
           Set-Content -Path .\DemoApp\Program.cs -Value @"
           using System;
           class Program
