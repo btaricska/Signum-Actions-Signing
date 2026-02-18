@@ -17,8 +17,6 @@ jobs:
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
-
-      # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
 
     steps:
@@ -45,7 +43,7 @@ jobs:
           echo "✅ Secrets validated"
           echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
-           - name: Configure Docker auth
+      - name: Configure Docker auth
         shell: bash
         env:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
@@ -63,11 +61,9 @@ jobs:
           }
           EOF
 
-          # Use a safe delimiter in case auth contains '/'
           sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
 
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
-
 
       - name: Start Signum Agent container
         shell: bash
@@ -91,11 +87,9 @@ jobs:
             -v "$PWD/$FILES_DIR:/mnt/$FILES_DIR" \
             "$SIGNUM_AGENT_IMAGE"
 
-          # Restart SignumService to activate PKCS#11
           echo "ℹ️ Restarting SignumService inside container..."
           docker exec "$CONTAINER_NAME" signum-util service --restart
 
-          # Wait for PKCS#11 token
           echo "⏳ Waiting for PKCS#11 token..."
           FOUND=0
           for i in {1..120}; do
@@ -110,7 +104,6 @@ jobs:
 
           if [ "$FOUND" -ne 1 ]; then
             echo "❌ No PKCS#11 token appeared after waiting 2 minutes"
-            echo "---- docker logs (tail) ----"
             docker logs "$CONTAINER_NAME" | tail -n 100
             exit 1
           fi
@@ -121,7 +114,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$FILES_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
-          echo "✅ JSON file created at $FILES_DIR/file.json"
+          echo "✅ JSON file created"
 
       - name: PKCS#11 inventory + sign JSON
         shell: bash
@@ -133,10 +126,8 @@ jobs:
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          echo "✅ Verifying input file exists inside the container..."
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
+          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found"; exit 1; }
 
-          echo "🔍 Listing tokens..."
           docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE"
 
           SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
@@ -146,47 +137,41 @@ jobs:
             echo "❌ No slots found"
             exit 1
           fi
-          echo "✅ Using slot: $SLOT"
 
-          echo "🔑 Listing private keys in slot $SLOT (with login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
             --login \
             --pin "$USER_PIN" \
             --list-objects --type privkey 2>&1 || true)"
+
           echo "$PRIV_OUT"
 
           if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
-            echo "❌ No private key objects visible in slot $SLOT."
+            echo "❌ No private key objects visible"
             exit 1
           fi
 
-          # Try to extract a clean hex ID (no spaces)
           KEY_ID="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
             | head -n 1 \
             | tr -d '\r ' \
             | grep -E '^[0-9A-Fa-f]+$' || true)"
 
-          # Fallback: extract label
           KEY_LABEL="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*label:[[:space:]]*//Ip' \
             | head -n 1 \
             | tr -d '\r' || true)"
 
           if [ -n "$KEY_ID" ]; then
-            echo "✅ Using private key ID: $KEY_ID"
             KEY_SELECTOR=(--id "$KEY_ID")
           elif [ -n "$KEY_LABEL" ]; then
-            echo "✅ Using private key label: $KEY_LABEL"
             KEY_SELECTOR=(--label "$KEY_LABEL")
           else
-            echo "❌ Could not determine a private key selector (no usable ID or label found)."
+            echo "❌ Could not determine private key selector"
             exit 1
           fi
 
-          echo "✍️ Signing JSON file..."
           docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
@@ -198,7 +183,6 @@ jobs:
             --input-file "$CONTAINER_FILE" \
             --output-file "$CONTAINER_SIG"
 
-          echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
 
       - name: Upload signature artifact
