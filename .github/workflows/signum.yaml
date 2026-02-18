@@ -45,7 +45,7 @@ jobs:
           echo "✅ Secrets validated"
           echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
-         - name: Configure Docker auth
+           - name: Configure Docker auth
         shell: bash
         env:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
@@ -68,7 +68,6 @@ jobs:
 
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
 
-          echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
 
       - name: Start Signum Agent container
         shell: bash
