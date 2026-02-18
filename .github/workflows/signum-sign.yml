@@ -1,27 +1,43 @@
-name: Signum Windows Agent Signing
+name: Signum Windows Agent Signing Demo
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
-  windows-agent:
-    name: Signum-Win-Sign
+  sign:
     runs-on: windows-latest
 
     steps:
-      - name: Download unsigned artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ExeToSign
-          path: .
-
-      - name: Download Signum Windows Agent
+      # ----------------------------
+      # Create a simple EXE to sign
+      # ----------------------------
+      - name: Create Demo Console App
+        shell: pwsh
         run: |
-          curl -o kf-agent.msi "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
+          dotnet new console -n DemoApp
+          Set-Content -Path .\DemoApp\Program.cs -Value @"
+          using System;
+          class Program
+          {
+              static void Main()
+              {
+                  Console.WriteLine("Hello from Signum signing demo!");
+              }
+          }
+          "@
+          dotnet publish .\DemoApp -c Release -r win-x64 --self-contained false
+          Copy-Item ".\DemoApp\bin\Release\net8.0\win-x64\publish\DemoApp.exe" .\demo.exe
 
+      # ----------------------------
+      # Download Signum Agent
+      # ----------------------------
+      - name: Download Signum Agent
+        run: |
+          curl -L -o kf-agent.msi "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/windows/4.40.1/kf-agent-x64-4.40.1-ffb85044-MS-WO_Trust.msi"
+
+      # ----------------------------
+      # Install Agent
+      # ----------------------------
       - name: Install Signum Agent
         shell: pwsh
         run: |
@@ -31,9 +47,11 @@ jobs:
             CLIENTID="${{ secrets.SIGNUM_CLIENTID }}" `
             AuthMode="LocalUsers" `
             AGENTMODE="SERVER" `
-            Language="en-US" `
-            /L*V "$env:GITHUB_WORKSPACE\signum-install.log"
+            Language="en-US"
 
+      # ----------------------------
+      # Authenticate Agent
+      # ----------------------------
       - name: Configure Agent Authentication
         shell: pwsh
         run: |
@@ -42,19 +60,19 @@ jobs:
             -username="${{ secrets.SIGNUM_USERNAME }}" `
             -password="${{ secrets.SIGNUM_PASSWORD }}"
 
+      # ----------------------------
+      # Restart Service
+      # ----------------------------
       - name: Restart RTService
         shell: pwsh
         run: |
-          Restart-Service -Name RTService
+          Restart-Service RTService
           Start-Sleep -Seconds 5
 
-      - name: List Available Certificates
-        shell: pwsh
-        run: |
-          Get-ChildItem Cert:\LocalMachine\My |
-          Select-Object Subject, Thumbprint
-
-      - name: Sign EXE with Signum Certificate
+      # ----------------------------
+      # Sign the EXE
+      # ----------------------------
+      - name: Sign EXE
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
@@ -64,15 +82,22 @@ jobs:
             /td sha256 `
             /sm `
             /n "Demo" `
-            *.exe
+            demo.exe
 
-      - name: Rename signed EXE
+      # ----------------------------
+      # Verify Signature
+      # ----------------------------
+      - name: Verify Signature
         shell: pwsh
         run: |
-          Rename-Item -Path *.exe -NewName windows-agent-signed.exe
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
+            verify /pa demo.exe
 
-      - name: Upload Signed Artifact
+      # ----------------------------
+      # Upload Signed File
+      # ----------------------------
+      - name: Upload Signed EXE
         uses: actions/upload-artifact@v4
         with:
-          name: ExeToVerify-Windows-Agent
-          path: windows-agent-signed.exe
+          name: signed-demo
+          path: demo.exe
