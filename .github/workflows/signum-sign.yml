@@ -1,4 +1,4 @@
-name: Signum Windows Agent JSON Demo
+name: Signum Simple Demo (Pinned .NET 8)
 
 on:
   workflow_dispatch:
@@ -10,29 +10,20 @@ jobs:
     steps:
 
     # -----------------------------------
-    # Create JSON file (for demo context)
+    # Force specific .NET version
     # -----------------------------------
-    - name: Create JSON File
-      shell: pwsh
-      run: |
-        $data = @{
-            application = "Signum Demo"
-            environment = "GitHub Actions"
-            generated = (Get-Date).ToString("u")
-        } | ConvertTo-Json -Depth 3
-
-        Set-Content -Path demo.json -Value $data
-        Write-Host "Created demo.json"
-        Get-Content demo.json
+    - name: Setup .NET 8 SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
 
     # -----------------------------------
-    # Create small EXE to sign
-    # (no hardcoded framework paths)
+    # Create and publish EXE
     # -----------------------------------
-    - name: Build Demo EXE
+    - name: Create and Publish Demo EXE
       shell: pwsh
       run: |
-        dotnet new console -n DemoApp
+        dotnet new console -n DemoApp --framework net8.0
 
         Set-Content -Path .\DemoApp\Program.cs -Value @"
         using System;
@@ -40,7 +31,7 @@ jobs:
         {
             static void Main()
             {
-                Console.WriteLine("Hello from Signum signing demo!");
+                Console.WriteLine("Hello from Signum demo!");
             }
         }
         "@
@@ -49,11 +40,8 @@ jobs:
             -c Release `
             -r win-x64 `
             --self-contained false `
-            -o .\publish
-
-        Copy-Item ".\publish\DemoApp.exe" ".\demo.exe"
-
-        Write-Host "demo.exe created"
+            -f net8.0 `
+            -o .\out
 
     # -----------------------------------
     # Download Signum Agent
@@ -109,7 +97,7 @@ jobs:
           /td sha256 `
           /sm `
           /n "Demo" `
-          demo.exe
+          .\out\DemoApp.exe
 
     # -----------------------------------
     # Verify Signature
@@ -118,15 +106,13 @@ jobs:
       shell: pwsh
       run: |
         & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" `
-          verify /pa demo.exe
+          verify /pa .\out\DemoApp.exe
 
     # -----------------------------------
-    # Upload Results
+    # Upload Signed EXE (optional)
     # -----------------------------------
-    - name: Upload Output Files
+    - name: Upload Signed EXE
       uses: actions/upload-artifact@v4
       with:
-        name: signum-demo-output
-        path: |
-          demo.exe
-          demo.json
+        name: signed-demo
+        path: .\out\DemoApp.exe
