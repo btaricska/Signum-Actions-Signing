@@ -18,7 +18,7 @@ jobs:
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
-      # Default PKCS#11 module path (we also auto-discover and override below if needed)
+      # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
 
     steps:
@@ -66,6 +66,14 @@ jobs:
           sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
 
+      - name: Prepare files directory (host permissions)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FILES_DIR"
+          # Make sure the container user can write into the bind mount
+          chmod -R a+rwx "$FILES_DIR"
+
       - name: Start Signum Agent container (tools image 4.40.1)
         shell: bash
         env:
@@ -76,15 +84,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$FILES_DIR"
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-
           docker pull "$SIGNUM_AGENT_IMAGE"
 
-          # Privileged helps containers that expect to manage services / drivers internally
           docker run -d \
             --name "$CONTAINER_NAME" \
             --privileged \
+            --user 0:0 \
             -e SIGNUM_HOSTNAME \
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
@@ -104,18 +110,7 @@ jobs:
             sleep 1
           done
           echo "✅ Container is running"
-
-          echo "🔎 Discovering PKCS#11 module inside container..."
-          FOUND_MODULE="$(docker exec "$CONTAINER_NAME" sh -lc 'ls -1 /usr/lib/*.so /usr/local/lib/*.so 2>/dev/null | grep -i pkcs11 | head -n 1 || true')"
-          if [ -n "$FOUND_MODULE" ]; then
-            echo "✅ Found PKCS#11 module: $FOUND_MODULE"
-            echo "PKCS11_MODULE=$FOUND_MODULE" >> "$GITHUB_ENV"
-          else
-            echo "⚠️ No pkcs11 .so discovered via scan; keeping PKCS11_MODULE=$PKCS11_MODULE"
-          fi
-
-          echo "---- container logs (tail) ----"
-          docker logs "$CONTAINER_NAME" | tail -n 120
+          docker logs "$CONTAINER_NAME" | tail -n 120 || true
 
       - name: Create JSON file to sign
         shell: bash
@@ -124,6 +119,9 @@ jobs:
           mkdir -p "$FILES_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created at $FILES_DIR/file.json"
+          # Pre-create signature file to avoid mount permission surprises
+          : > "$FILES_DIR/file.json.sig"
+          chmod 666 "$FILES_DIR/file.json.sig"
 
       - name: PKCS#11 inventory + sign JSON
         shell: bash
@@ -139,13 +137,10 @@ jobs:
           docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
 
           echo "🔍 PKCS#11 module path: $PKCS11_MODULE"
-          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_MODULE' || true"
-
-          echo "🔍 Listing tokens (non-fatal if none)..."
-          docker exec "$CONTAINER_NAME" p11tool --provider "$PKCS11_MODULE" --list-tokens || true
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_MODULE'"
 
           echo "🔍 Listing slots..."
-          SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots 2>&1 || true)"
+          SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots 2>&1)"
           echo "$SLOTS_OUT"
 
           SLOT="$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
@@ -161,7 +156,7 @@ jobs:
             --slot "$SLOT" \
             --login \
             --pin "$USER_PIN" \
-            --list-objects --type privkey 2>&1 || true)"
+            --list-objects --type privkey 2>&1)"
           echo "$PRIV_OUT"
 
           if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
@@ -169,12 +164,14 @@ jobs:
             exit 1
           fi
 
+          # Pick the first visible private key ID
           KEY_ID="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
             | head -n 1 \
             | tr -d '\r ' \
             | grep -E '^[0-9A-Fa-f]+$' || true)"
 
+          # Fallback: pick the first label
           KEY_LABEL="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*label:[[:space:]]*//Ip' \
             | head -n 1 \
