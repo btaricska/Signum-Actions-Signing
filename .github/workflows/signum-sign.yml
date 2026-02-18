@@ -18,8 +18,10 @@ jobs:
         run: |
           dotnet new console -n DemoApp --framework net8.0
 
-          $jsonContent = '${{ secrets.JSON_TO_SIGN }}'
+          # Read JSON secret correctly
+          $jsonContent = "${{ secrets.JSON_TO_SIGN }}"
 
+          # Replace Program.cs
           Set-Content -Path .\DemoApp\Program.cs -Value @"
           using System;
           class Program
@@ -31,6 +33,7 @@ jobs:
           }
           "@
 
+          # Publish EXE to fixed folder
           dotnet publish .\DemoApp -c Release -r win-x64 --self-contained false -f net8.0 -o .\out
 
       - name: Download Signum Agent
