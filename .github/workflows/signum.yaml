@@ -13,10 +13,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.20.1
+      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/signum-bdewberry-testing-docker/signum-linux-agent-tools:4.40.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
+
+      # Default PKCS#11 module path (we also auto-discover and override below if needed)
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
 
     steps:
@@ -43,7 +45,7 @@ jobs:
           echo "✅ Secrets validated"
           echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
-      - name: Configure Docker auth
+      - name: Configure Docker auth (JFrog)
         shell: bash
         env:
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
@@ -62,10 +64,9 @@ jobs:
           EOF
 
           sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
-
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
 
-      - name: Start Signum Agent container (agent-tools 4.40.1)
+      - name: Start Signum Agent container (tools image 4.40.1)
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -76,12 +77,14 @@ jobs:
           set -euo pipefail
 
           mkdir -p "$FILES_DIR"
-
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
-          # Run the tools image (no signum-util in this version)
+          docker pull "$SIGNUM_AGENT_IMAGE"
+
+          # Privileged helps containers that expect to manage services / drivers internally
           docker run -d \
             --name "$CONTAINER_NAME" \
+            --privileged \
             -e SIGNUM_HOSTNAME \
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
@@ -89,27 +92,30 @@ jobs:
             -e SIGNUM_LOGLEVEL=LOW \
             -e SIGNUM_LOGTYPE=FILE \
             -v "$PWD:/mnt" \
-            keyfactor.jfrog.io/signum-bdewberry-testing-docker/signum-linux-agent-tools:4.40.1
+            "$SIGNUM_AGENT_IMAGE"
 
-          echo "⏳ Waiting for PKCS#11 token..."
-          FOUND=0
-          for i in {1..120}; do
-            TOKENS="$(docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE" 2>/dev/null || true)"
-            if echo "$TOKENS" | grep -q "token:"; then
-              echo "✅ PKCS#11 token found"
-              FOUND=1
-              break
+          echo "⏳ Waiting for container to stay up..."
+          for i in {1..30}; do
+            if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+              echo "❌ Container exited early. Logs:"
+              docker logs "$CONTAINER_NAME" | tail -n 250
+              exit 1
             fi
             sleep 1
           done
+          echo "✅ Container is running"
 
-          if [ "$FOUND" -ne 1 ]; then
-            echo "❌ No PKCS#11 token appeared after waiting 2 minutes"
-            echo "---- docker logs (tail) ----"
-            docker logs "$CONTAINER_NAME" | tail -n 150
-            exit 1
+          echo "🔎 Discovering PKCS#11 module inside container..."
+          FOUND_MODULE="$(docker exec "$CONTAINER_NAME" sh -lc 'ls -1 /usr/lib/*.so /usr/local/lib/*.so 2>/dev/null | grep -i pkcs11 | head -n 1 || true')"
+          if [ -n "$FOUND_MODULE" ]; then
+            echo "✅ Found PKCS#11 module: $FOUND_MODULE"
+            echo "PKCS11_MODULE=$FOUND_MODULE" >> "$GITHUB_ENV"
+          else
+            echo "⚠️ No pkcs11 .so discovered via scan; keeping PKCS11_MODULE=$PKCS11_MODULE"
           fi
 
+          echo "---- container logs (tail) ----"
+          docker logs "$CONTAINER_NAME" | tail -n 120
 
       - name: Create JSON file to sign
         shell: bash
@@ -117,7 +123,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$FILES_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
-          echo "✅ JSON file created"
+          echo "✅ JSON file created at $FILES_DIR/file.json"
 
       - name: PKCS#11 inventory + sign JSON
         shell: bash
@@ -129,29 +135,37 @@ jobs:
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found"; exit 1; }
+          echo "✅ Verifying input file exists inside the container..."
+          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found inside container"; exit 1; }
 
-          docker exec "$CONTAINER_NAME" p11tool --list-tokens --provider "$PKCS11_MODULE"
+          echo "🔍 PKCS#11 module path: $PKCS11_MODULE"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_MODULE' || true"
 
-          SLOT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots \
-            | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
+          echo "🔍 Listing tokens (non-fatal if none)..."
+          docker exec "$CONTAINER_NAME" p11tool --provider "$PKCS11_MODULE" --list-tokens || true
 
+          echo "🔍 Listing slots..."
+          SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots 2>&1 || true)"
+          echo "$SLOTS_OUT"
+
+          SLOT="$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
           if [ -z "${SLOT:-}" ]; then
-            echo "❌ No slots found"
+            echo "❌ No slots found (module may not be loading / driver not ready)."
             exit 1
           fi
+          echo "✅ Using slot: $SLOT"
 
+          echo "🔑 Listing private keys in slot $SLOT (with login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
             --login \
             --pin "$USER_PIN" \
             --list-objects --type privkey 2>&1 || true)"
-
           echo "$PRIV_OUT"
 
           if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
-            echo "❌ No private key objects visible"
+            echo "❌ No private key objects visible in slot $SLOT."
             exit 1
           fi
 
@@ -167,14 +181,17 @@ jobs:
             | tr -d '\r' || true)"
 
           if [ -n "$KEY_ID" ]; then
+            echo "✅ Using private key ID: $KEY_ID"
             KEY_SELECTOR=(--id "$KEY_ID")
           elif [ -n "$KEY_LABEL" ]; then
+            echo "✅ Using private key label: $KEY_LABEL"
             KEY_SELECTOR=(--label "$KEY_LABEL")
           else
-            echo "❌ Could not determine private key selector"
+            echo "❌ Could not determine a private key selector (no usable ID or label found)."
             exit 1
           fi
 
+          echo "✍️ Signing JSON file..."
           docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
@@ -186,6 +203,7 @@ jobs:
             --input-file "$CONTAINER_FILE" \
             --output-file "$CONTAINER_SIG"
 
+          echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
 
       - name: Upload signature artifact
