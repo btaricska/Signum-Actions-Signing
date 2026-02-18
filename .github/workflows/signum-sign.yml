@@ -13,16 +13,13 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:latest
+      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/dev-oci/signum-agent:4.40.1
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
       # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
-
-      # Optional: expected subject fragment to help humans confirm the right cert is present
-      EXPECTED_CERT_SUBJECT: "CN=CodeSigningCertificate"
 
     steps:
       - name: Checkout repository
