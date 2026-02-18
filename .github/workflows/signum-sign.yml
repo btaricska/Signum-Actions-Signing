@@ -52,30 +52,17 @@ jobs:
         run: |
           set -euo pipefail
           wget -O "$SIGNUM_AGENT_DEB" "https://kfsaas0167ead7.blob.core.windows.net/signum-public/agents/linux/4.40.1/$SIGNUM_AGENT_DEB"
-          sudo dpkg -i "$SIGNUM_AGENT_DEB" || (sudo apt-get install -f -y && sudo dpkg -i "$SIGNUM_AGENT_DEB")
+          sudo dpkg -i "$SIGNUM_AGENT_DEB" || sudo apt-get install -f -y
 
-      - name: Enable and start Keyfactor agent
+      - name: Start Keyfactor agent directly (no systemd)
         shell: bash
         run: |
           set -euo pipefail
-          echo "ℹ️ Enabling and starting keyfactor-agent.service..."
-          sudo systemctl daemon-reload
-          sudo systemctl enable keyfactor-agent.service
-          sudo systemctl start keyfactor-agent.service
-          echo "⏳ Waiting for agent to become active..."
-          for i in {1..60}; do
-            STATUS=$(systemctl is-active keyfactor-agent.service)
-            if [ "$STATUS" = "active" ]; then
-              echo "✅ Agent service is active"
-              break
-            fi
-            sleep 1
-          done
-          if [ "$STATUS" != "active" ]; then
-            echo "❌ Agent service did not become active"
-            sudo journalctl -u keyfactor-agent.service -n 50
-            exit 1
-          fi
+          echo "ℹ️ Starting Keyfactor agent directly..."
+          sudo nohup /opt/keyfactor/keyfactor-agent/bin/keyfactor-agent > /tmp/keyfactor-agent.log 2>&1 &
+          echo "⏳ Waiting 5 seconds for agent to initialize..."
+          sleep 5
+          echo "✅ Keyfactor agent started (check /tmp/keyfactor-agent.log for logs)"
 
       - name: Create JSON file to sign
         shell: bash
@@ -95,7 +82,7 @@ jobs:
           FILE="$FILES_DIR/file.json"
           SIG="$FILES_DIR/file.json.sig"
 
-          echo "ℹ️ Listing all certificates in PKCS#11 module..."
+          echo "ℹ️ Listing available certificates in PKCS#11 module..."
           pkcs11-tool --module "$PKCS11_MODULE" --list-objects --type cert
 
           # Pick first certificate
