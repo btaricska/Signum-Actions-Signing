@@ -1,4 +1,4 @@
-name: Sign File via Signum Agent + PKCS11
+name: Sign File via Signum Agent + PKCS11 (No PIN)
 
 on:
   workflow_dispatch:
@@ -17,8 +17,6 @@ jobs:
       FILES_DIR: filestosign
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
-
-      # PKCS#11 module path inside container
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
 
     steps:
@@ -33,17 +31,15 @@ jobs:
           SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
           SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
           JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
-          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
-          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH USER_PIN; do
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
             if [ -z "${!s:-}" ]; then
               echo "❌ Missing secret: $s"
               exit 1
             fi
           done
           echo "✅ Secrets validated"
-          echo "ℹ️ USER_PIN present (length ${#USER_PIN})"
 
       - name: Configure Docker auth (JFrog)
         shell: bash
@@ -71,7 +67,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$FILES_DIR"
-          # Make sure the container user can write into the bind mount
           chmod -R a+rwx "$FILES_DIR"
 
       - name: Start Signum Agent container (tools image 4.40.1)
@@ -119,14 +114,11 @@ jobs:
           mkdir -p "$FILES_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created at $FILES_DIR/file.json"
-          # Pre-create signature file to avoid mount permission surprises
           : > "$FILES_DIR/file.json.sig"
           chmod 666 "$FILES_DIR/file.json.sig"
 
-      - name: PKCS#11 inventory + sign JSON
+      - name: PKCS#11 inventory + sign JSON (NO PIN)
         shell: bash
-        env:
-          USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
@@ -145,17 +137,15 @@ jobs:
 
           SLOT="$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
           if [ -z "${SLOT:-}" ]; then
-            echo "❌ No slots found (module may not be loading / driver not ready)."
+            echo "❌ No slots found."
             exit 1
           fi
           echo "✅ Using slot: $SLOT"
 
-          echo "🔑 Listing private keys in slot $SLOT (with login)..."
+          echo "🔑 Listing private keys in slot $SLOT (no login)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
-            --login \
-            --pin "$USER_PIN" \
             --list-objects --type privkey 2>&1)"
           echo "$PRIV_OUT"
 
@@ -164,14 +154,12 @@ jobs:
             exit 1
           fi
 
-          # Pick the first visible private key ID
           KEY_ID="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
             | head -n 1 \
             | tr -d '\r ' \
             | grep -E '^[0-9A-Fa-f]+$' || true)"
 
-          # Fallback: pick the first label
           KEY_LABEL="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*label:[[:space:]]*//Ip' \
             | head -n 1 \
@@ -184,21 +172,20 @@ jobs:
             echo "✅ Using private key label: $KEY_LABEL"
             KEY_SELECTOR=(--label "$KEY_LABEL")
           else
-            echo "❌ Could not determine a private key selector (no usable ID or label found)."
+            echo "❌ Could not determine a private key selector."
             exit 1
           fi
 
-          echo "✍️ Signing JSON file..."
+          echo "✍️ Signing JSON file (NO LOGIN / NO PIN)..."
           docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
-            --login \
-            --pin "$USER_PIN" \
             "${KEY_SELECTOR[@]}" \
             --mechanism RSA-PKCS \
             --sign \
             --input-file "$CONTAINER_FILE" \
-            --output-file "$CONTAINER_SIG"
+            --output-file "$CONTAINER_SIG" \
+            --verbose
 
           echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
