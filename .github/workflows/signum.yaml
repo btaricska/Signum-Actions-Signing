@@ -117,7 +117,7 @@ jobs:
           : > "$FILES_DIR/file.json.sig"
           chmod 666 "$FILES_DIR/file.json.sig"
 
-      - name: PKCS#11 inventory + sign JSON (NO PIN)
+      - name: PKCS#11 inventory + sign JSON (NO PIN) - use 2nd key
         shell: bash
         run: |
           set -euo pipefail
@@ -154,25 +154,27 @@ jobs:
             exit 1
           fi
 
+          # Pick the SECOND key (2nd "ID:" line). IDs are already hex in your output.
           KEY_ID="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
-            | head -n 1 \
+            | sed -n '2p' \
             | tr -d '\r ' \
             | grep -E '^[0-9A-Fa-f]+$' || true)"
 
+          # Fallback: pick the SECOND label line
           KEY_LABEL="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*label:[[:space:]]*//Ip' \
-            | head -n 1 \
+            | sed -n '2p' \
             | tr -d '\r' || true)"
 
           if [ -n "$KEY_ID" ]; then
-            echo "✅ Using private key ID: $KEY_ID"
+            echo "✅ Using private key ID (2nd): $KEY_ID"
             KEY_SELECTOR=(--id "$KEY_ID")
           elif [ -n "$KEY_LABEL" ]; then
-            echo "✅ Using private key label: $KEY_LABEL"
+            echo "✅ Using private key label (2nd): $KEY_LABEL"
             KEY_SELECTOR=(--label "$KEY_LABEL")
           else
-            echo "❌ Could not determine a private key selector."
+            echo "❌ Could not determine a private key selector for the 2nd key."
             exit 1
           fi
 
