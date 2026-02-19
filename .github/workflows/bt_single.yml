@@ -1,4 +1,4 @@
-name: bt_single
+name: bt_list_keys
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  sign:
+  list-keys:
     runs-on: ubuntu-latest
 
     env:
@@ -99,7 +99,7 @@ jobs:
           done
           echo "✅ Container is running"
 
-      - name: Create JSON file to sign
+      - name: Create JSON file (for reference)
         shell: bash
         run: |
           set -euo pipefail
@@ -109,76 +109,40 @@ jobs:
           chmod 666 "$FILES_DIR/file.json.sig"
           echo "✅ JSON file created"
 
-      - name: Sign JSON with last key in HSM
+      - name: List all keys in HSM slots
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
-          CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
-          CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
-
-          echo "✅ Verifying input file exists..."
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found"; exit 1; }
 
           echo "🔍 Listing PKCS#11 slots..."
           SLOTS_OUT=$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots 2>&1)
           echo "$SLOTS_OUT"
 
-          SLOT=$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')
-          if [ -z "$SLOT" ]; then
+          SLOTS=$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1}')
+          if [ -z "$SLOTS" ]; then
             echo "❌ No slots found"
             exit 1
           fi
-          echo "✅ Using slot: $SLOT"
 
-          echo "🔑 Listing private keys in slot..."
-          PRIV_OUT=$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --slot "$SLOT" --list-objects --type privkey 2>&1)
-          echo "$PRIV_OUT"
+          for SLOT in $SLOTS; do
+            echo "✅ Slot $SLOT keys:"
+            docker exec "$CONTAINER_NAME" pkcs11-tool \
+              --module "$PKCS11_MODULE" \
+              --slot "$SLOT" \
+              ${USER_PIN:+--login --pin "$USER_PIN"} \
+              --list-objects --type privkey | awk '
+                /^Private Key Object/ {label=""; id=""}
+                /Label:/ {label=$0}
+                /ID:/ {id=$0}
+                {if(label!="" && id!="") {print label, id; label=""; id=""}}
+              '
+          done
 
-          if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
-            echo "❌ No private key objects found"
-            exit 1
-          fi
-
-          # Select LAST key
-          KEY_ID=$(echo "$PRIV_OUT" | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' | tail -n 1 | tr -d '\r ' | grep -E '^[0-9A-Fa-f]+$' || true)
-          if [ -z "$KEY_ID" ]; then
-            echo "❌ Could not determine last key ID"
-            exit 1
-          fi
-          echo "✅ Using last private key ID: $KEY_ID"
-
-          echo "✍️ Signing file..."
-          set +e
-          OUT=$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-            --module "$PKCS11_MODULE" \
-            --slot "$SLOT" \
-            --id "$KEY_ID" \
-            ${USER_PIN:+--login --pin "$USER_PIN"} \
-            --mechanism RSA-PKCS \
-            --sign \
-            --input-file "$CONTAINER_FILE" \
-            --output-file "$CONTAINER_SIG" \
-            --verbose 2>&1)
-          RC=$?
-          set -e
-
-          echo "$OUT"
-          echo "pkcs11-tool exit code: $RC"
-
-          if [ "$RC" -ne 0 ]; then
-            echo "❌ Signing failed"
-            exit "$RC"
-          fi
-
-          echo "✅ Signature written to $CONTAINER_SIG"
-          ls -la "$FILES_DIR"
-
-      - name: Upload signature artifact
+      - name: Upload JSON artifact
         uses: actions/upload-artifact@v4
         with:
-          name: signed-json-and-sig
+          name: demo-json
           path: |
             filestosign/file.json
-            filestosign/file.json.sig
