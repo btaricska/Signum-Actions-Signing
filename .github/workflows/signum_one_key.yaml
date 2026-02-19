@@ -1,4 +1,4 @@
-name: Sign Files via Signum Agent + PKCS11
+name: signum_one_key
 
 on:
   workflow_dispatch:
@@ -143,4 +143,3 @@ jobs:
           path: |
             filestosign/*.json
             filestosign/*.json.sig
-
