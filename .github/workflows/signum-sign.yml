@@ -116,8 +116,7 @@ jobs:
           for KEY_ID in "${KEYS[@]}"; do
             echo "✍️ Signing files with key ID: $KEY_ID"
             for FILE in "$FILES_DIR"/*.json; do
-              # Append the key ID to the signature file so each key produces a separate signature
-              SIG="$FILE.$KEY_ID.sig"
+              SIG="$FILE.sig"
               set +e
               docker exec "$CONTAINER_NAME" pkcs11-tool \
                 --module "$PKCS11_MODULE" \
@@ -143,4 +142,4 @@ jobs:
           name: signed-files
           path: |
             filestosign/*.json
-            filestosign/*.sig
+            filestosign/*.json.sig
