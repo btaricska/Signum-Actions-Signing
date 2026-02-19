@@ -18,6 +18,11 @@ jobs:
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
       PKCS11_MODULE: /usr/lib/libkeyfactorpkcs11.so
+      # Define your four keys here (replace with actual IDs from your HSM)
+      KEY1: "ABCDEF01"
+      KEY2: "ABCDEF02"
+      KEY3: "ABCDEF03"
+      KEY4: "ABCDEF04"
 
     steps:
       - name: Checkout repository
@@ -99,51 +104,36 @@ jobs:
           done
           echo "✅ Sample JSON files created"
 
-      - name: Loop through keys and sign files
+      - name: Sign files with four specific keys
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
 
-          echo "🔍 Listing HSM slots..."
-          SLOTS=$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1}')
-          if [ -z "$SLOTS" ]; then
-            echo "❌ No HSM slots found"
-            exit 1
-          fi
+          KEYS=("$KEY1" "$KEY2" "$KEY3" "$KEY4")
 
-          for SLOT in $SLOTS; do
-            echo "✅ Using slot: $SLOT"
-
-            KEYS=$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --slot "$SLOT" --list-objects --type privkey | awk '/^ID:/ {print $2}' | tr -d '\r ')
-            if [ -z "$KEYS" ]; then
-              echo "⚠️ No private keys found in slot $SLOT"
-              continue
-            fi
-
-            for KEY_ID in $KEYS; do
-              echo "✍️ Signing files with key ID: $KEY_ID"
-              for FILE in "$FILES_DIR"/*.json; do
-                SIG="$FILE.sig"
-                set +e
-                docker exec "$CONTAINER_NAME" pkcs11-tool \
-                  --module "$PKCS11_MODULE" \
-                  --slot "$SLOT" \
-                  --id "$KEY_ID" \
-                  ${USER_PIN:+--login --pin "$USER_PIN"} \
-                  --mechanism RSA-PKCS \
-                  --sign \
-                  --input-file "/mnt/$FILE" \
-                  --output-file "/mnt/$SIG"
-                RC=$?
-                set -e
-                if [ "$RC" -ne 0 ]; then
-                  echo "❌ Failed to sign $FILE with key $KEY_ID"
-                  exit "$RC"
-                fi
-                echo "✅ Signed $FILE -> $SIG"
-              done
+          for KEY_ID in "${KEYS[@]}"; do
+            echo "✍️ Signing files with key ID: $KEY_ID"
+            for FILE in "$FILES_DIR"/*.json; do
+              # Append the key ID to the signature file so each key produces a separate signature
+              SIG="$FILE.$KEY_ID.sig"
+              set +e
+              docker exec "$CONTAINER_NAME" pkcs11-tool \
+                --module "$PKCS11_MODULE" \
+                --id "$KEY_ID" \
+                ${USER_PIN:+--login --pin "$USER_PIN"} \
+                --mechanism RSA-PKCS \
+                --sign \
+                --input-file "/mnt/$FILE" \
+                --output-file "/mnt/$SIG"
+              RC=$?
+              set -e
+              if [ "$RC" -ne 0 ]; then
+                echo "❌ Failed to sign $FILE with key $KEY_ID"
+                exit "$RC"
+              fi
+              echo "✅ Signed $FILE -> $SIG"
             done
           done
 
@@ -153,4 +143,4 @@ jobs:
           name: signed-files
           path: |
             filestosign/*.json
-            filestosign/*.json.sig
+            filestosign/*.sig
