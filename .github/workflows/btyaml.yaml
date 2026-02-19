@@ -40,6 +40,7 @@ jobs:
             fi
           done
           echo "✅ Secrets validated"
+
       - name: Configure Docker auth (JFrog)
         shell: bash
         env:
@@ -58,12 +59,14 @@ jobs:
           EOF
           sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
+
       - name: Prepare files directory (host permissions)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$FILES_DIR"
           chmod -R a+rwx "$FILES_DIR"
+
       - name: Start Signum Agent container (tools image 4.40.1)
         shell: bash
         env:
@@ -83,10 +86,11 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -e SIGNUM_LOGLEVEL=HIGH \
+            -e SIGNUM_LOGLEVEL=VERBOSE \
             -e SIGNUM_LOGTYPE=FILE \
             -v "$PWD:/mnt" \
             "$SIGNUM_AGENT_IMAGE"
+
           echo "⏳ Waiting for container to stay up..."
           for i in {1..30}; do
             if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
@@ -97,7 +101,8 @@ jobs:
             sleep 1
           done
           echo "✅ Container is running"
-          docker logs "$CONTAINER_NAME" | tail -n 120 || true
+          docker logs "$CONTAINER_NAME" | tail -n 250 || true
+
       - name: Create JSON file to sign
         shell: bash
         run: |
@@ -105,53 +110,66 @@ jobs:
           mkdir -p "$FILES_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
           echo "✅ JSON file created at $FILES_DIR/file.json"
-          # Pre-create signature file to avoid mount permission surprises
           : > "$FILES_DIR/file.json.sig"
           chmod 666 "$FILES_DIR/file.json.sig"
-      - name: PKCS#11 inventory + sign JSON (capture errors + retry with login if provided)
+
+      - name: PKCS#11 inventory + sign JSON (verbose logging)
         shell: bash
         env:
-          # If you truly don't need a PIN, leave this secret unset/empty.
           USER_PIN: ${{ secrets.USER_PIN }}
         run: |
           set -euo pipefail
+
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
+
           echo "✅ Verifying input file exists inside the container..."
           docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found"; exit 1; }
+
           echo "🔍 PKCS#11 module path: $PKCS11_MODULE"
           docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_MODULE'"
-          echo "🔍 Listing slots..."
-          SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots 2>&1)"
+
+          echo "🔍 Listing slots (verbose)..."
+          SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
+            --module "$PKCS11_MODULE" \
+            --list-slots \
+            --verbose 2>&1)"
           echo "$SLOTS_OUT"
+
           SLOT="$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
           if [ -z "${SLOT:-}" ]; then
             echo "❌ No slots found."
             exit 1
           fi
           echo "✅ Using slot: $SLOT"
-          echo "🔑 Listing private keys in slot $SLOT (no login)..."
+
+          echo "🔑 Listing private keys in slot $SLOT (verbose)..."
           PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
-            --list-objects --type privkey 2>&1)"
+            --list-objects --type privkey \
+            --verbose 2>&1)"
           echo "$PRIV_OUT"
+
           if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
             echo "❌ No private key objects visible in slot $SLOT."
             exit 1
           fi
-          # Use FIRST key in the list
+
           KEY_ID="$(echo "$PRIV_OUT" \
             | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
             | head -n 1 \
             | tr -d '\r ' \
             | grep -E '^[0-9A-Fa-f]+$' || true)"
+
           if [ -z "${KEY_ID:-}" ]; then
             echo "❌ Could not determine first key ID."
             exit 1
           fi
+
           echo "✅ Using first private key ID: $KEY_ID"
-          echo "✍️ Signing (no login)..."
+          echo "✍️ Signing (verbose)..."
+
           set +e
           OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
@@ -164,10 +182,12 @@ jobs:
             --verbose 2>&1)"
           RC=$?
           set -e
+
           echo "$OUT"
           echo "pkcs11-tool exit code: $RC"
+
           if [ "$RC" -ne 0 ] && [ -n "${USER_PIN:-}" ]; then
-            echo "🔁 Retrying with --login (USER_PIN provided)..."
+            echo "🔁 Retrying with --login (verbose)..."
             set +e
             OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
               --module "$PKCS11_MODULE" \
@@ -185,12 +205,15 @@ jobs:
             echo "$OUT"
             echo "pkcs11-tool exit code (retry): $RC"
           fi
+
           if [ "$RC" -ne 0 ]; then
             echo "❌ Signing failed"
             exit "$RC"
           fi
+
           echo "✅ Signature written to $FILES_DIR/file.json.sig"
           ls -la "$FILES_DIR"
+
       - name: Upload signature artifact
         uses: actions/upload-artifact@v4
         with:
