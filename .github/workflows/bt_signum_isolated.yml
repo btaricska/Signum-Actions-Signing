@@ -1,4 +1,4 @@
-name: Sign Files via Signum Agent + PKCS11
+name: bt signum isolated
 
 on:
   workflow_dispatch:
