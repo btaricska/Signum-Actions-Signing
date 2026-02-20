@@ -10,8 +10,9 @@ on:
         required: false
         type: string
 
+# Use the same minimal permissions pattern as your earlier workflow
 permissions:
-  contents: write
+  contents: read
   packages: read
 
 jobs:
@@ -19,20 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     environment: signum
 
-    # IMPORTANT: This runs steps INSIDE the container, so keyfactor-setup + service work naturally.
+    # Job runs inside the container image
     container:
       image: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/signum-agent:v4.40.1
+      # IMPORTANT: container jobs must be able to pull BEFORE any steps run
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     env:
       SIGNUM_HOST: ${{ secrets.SIGNUM_HOST }}
       SIGNUM_CLIENT_ID: ${{ secrets.SIGNUM_CLIENT_ID }}
       SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
       SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-
-      # set this as an Environment variable (vars) in the "signum" environment if you want a preferred alias
       SIGNUM_CERT_ALIAS: ${{ vars.SIGNUM_CERT_ALIAS }}
-
-      # optional timestamp authority URL (can be empty)
       SIGNUM_TSA_URL: ${{ vars.SIGNUM_TSA_URL }}
 
       PKCS11_CFG: /etc/keyfactor/keyfactorpkcs11.cfg
@@ -79,7 +80,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # IMPORTANT: loglevel must be NONE|LOW|MEDIUM|HIGH (VERBOSE will break init)
           keyfactor-setup \
             hostname="$SIGNUM_HOST" \
             clientid="$SIGNUM_CLIENT_ID" \
@@ -96,14 +96,12 @@ jobs:
           SVC_DIR=/usr/local/keyfactor/service
           LOG=/var/log/KeyfactorService.log
 
-          # start in background
           if [[ -x "$SVC_DIR/KeyfactorService" ]]; then
             "$SVC_DIR/KeyfactorService" >>"$LOG" 2>&1 &
           else
             dotnet "$SVC_DIR/KeyfactorService.dll" >>"$LOG" 2>&1 &
           fi
 
-          # wait until it listens locally (default in your logs)
           for i in $(seq 1 120); do
             (exec 3<>/dev/tcp/127.0.0.1/51599) >/dev/null 2>&1 && { echo "✅ agent listening on 127.0.0.1:51599"; exit 0; }
             sleep 1
@@ -130,7 +128,6 @@ jobs:
             [[ -f "${{ inputs.jar_path }}" ]] || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
             printf '%s\n' "${{ inputs.jar_path }}" > jars.txt
           else
-            # sign any jar in repo by default
             mapfile -t found < <(find . -type f -name '*.jar' -not -path './.git/*' | sort || true)
             if (( ${#found[@]} == 0 )); then
               echo "❌ No JAR files found to sign"
@@ -146,11 +143,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           HINT="${SIGNUM_CERT_ALIAS:-}"
           echo "Alias hint (optional): ${HINT:-<none>}"
 
-          # List keystore entries via PKCS#11 provider
           keytool -J--add-modules=jdk.crypto.cryptoki \
             -list -v \
             -keystore NONE \
@@ -159,7 +154,6 @@ jobs:
             -providerClass sun.security.pkcs11.SunPKCS11 \
             -providerArg "$PKCS11_CFG" > pkcs11-list.txt
 
-          # Extract aliases where Entry type == PrivateKeyEntry
           awk '
             BEGIN{alias=""; type=""}
             /^Alias name: /{alias=$0; sub(/^Alias name: /,"",alias)}
@@ -249,19 +243,3 @@ jobs:
         with:
           name: keyfactor-service-log
           path: /var/log/KeyfactorService.log
-
-      - name: Summary
-        if: always()
-        shell: bash
-        run: |
-          {
-            echo "### Keyfactor Signum JAR Signing"
-            echo "- Alias: \`${SIGNING_ALIAS:-<none>}\`"
-            echo "- TSA: \`${SIGNUM_TSA_URL:-<none>}\`"
-            echo "- Output: \`out/signed/\`"
-            if [[ -f out/signed/manifest.txt ]]; then
-              echo ""
-              echo "#### Manifest"
-              sed 's/^/- /' out/signed/manifest.txt
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
