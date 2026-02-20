@@ -1,0 +1,267 @@
+name: "Keyfactor Signum Jar Signing"
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      jar_path:
+        description: "Optional path to a specific JAR to sign (e.g., apps/hello/app_unsigned.jar)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    environment: signum
+
+    # IMPORTANT: This runs steps INSIDE the container, so keyfactor-setup + service work naturally.
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/signum-agent:v4.40.1
+
+    env:
+      SIGNUM_HOST: ${{ secrets.SIGNUM_HOST }}
+      SIGNUM_CLIENT_ID: ${{ secrets.SIGNUM_CLIENT_ID }}
+      SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+      SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+
+      # set this as an Environment variable (vars) in the "signum" environment if you want a preferred alias
+      SIGNUM_CERT_ALIAS: ${{ vars.SIGNUM_CERT_ALIAS }}
+
+      # optional timestamp authority URL (can be empty)
+      SIGNUM_TSA_URL: ${{ vars.SIGNUM_TSA_URL }}
+
+      PKCS11_CFG: /etc/keyfactor/keyfactorpkcs11.cfg
+      SIGNED_DIR: out/signed
+
+    steps:
+      - name: Install git + git-lfs (needed inside container for checkout)
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends git git-lfs ca-certificates
+          git lfs install --system
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SIGNUM_HOST SIGNUM_CLIENT_ID SIGNUM_USERNAME SIGNUM_PASSWORD; do
+            [[ -n "${!v:-}" ]] || { echo "❌ Missing $v in Environment 'signum' secrets"; exit 1; }
+          done
+          echo "✅ Required secrets present"
+
+      - name: Stage PKCS#11 cfg & verify library
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d /etc/keyfactor
+          cat > "$PKCS11_CFG" <<'EOF'
+          name = KeyfactorPKCS11
+          library = /usr/lib/libkeyfactorpkcs11.so
+          description = "Keyfactor PKCS#11 interface"
+          EOF
+          test -f /usr/lib/libkeyfactorpkcs11.so || { echo "❌ missing /usr/lib/libkeyfactorpkcs11.so"; exit 1; }
+          echo "✅ PKCS#11 cfg created at $PKCS11_CFG"
+
+      - name: Configure Signum agent (keyfactor-setup)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # IMPORTANT: loglevel must be NONE|LOW|MEDIUM|HIGH (VERBOSE will break init)
+          keyfactor-setup \
+            hostname="$SIGNUM_HOST" \
+            clientid="$SIGNUM_CLIENT_ID" \
+            username="$SIGNUM_USERNAME" \
+            password="$SIGNUM_PASSWORD" \
+            loglevel=HIGH \
+            logtype=FILE
+
+      - name: Start agent service & wait for port
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SVC_DIR=/usr/local/keyfactor/service
+          LOG=/var/log/KeyfactorService.log
+
+          # start in background
+          if [[ -x "$SVC_DIR/KeyfactorService" ]]; then
+            "$SVC_DIR/KeyfactorService" >>"$LOG" 2>&1 &
+          else
+            dotnet "$SVC_DIR/KeyfactorService.dll" >>"$LOG" 2>&1 &
+          fi
+
+          # wait until it listens locally (default in your logs)
+          for i in $(seq 1 120); do
+            (exec 3<>/dev/tcp/127.0.0.1/51599) >/dev/null 2>&1 && { echo "✅ agent listening on 127.0.0.1:51599"; exit 0; }
+            sleep 1
+          done
+
+          echo "❌ Agent did not open 127.0.0.1:51599 in time"
+          tail -n 250 "$LOG" || true
+          exit 1
+
+      - name: keyfactor-setup test
+        shell: bash
+        run: |
+          set -euo pipefail
+          keyfactor-setup test || (echo "❌ keyfactor-setup test failed"; tail -n 250 /var/log/KeyfactorService.log || true; exit 1)
+
+      - name: Discover JARs to sign
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$SIGNED_DIR"
+          > jars.txt
+
+          if [[ -n "${{ inputs.jar_path }}" ]]; then
+            [[ -f "${{ inputs.jar_path }}" ]] || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
+            printf '%s\n' "${{ inputs.jar_path }}" > jars.txt
+          else
+            # sign any jar in repo by default
+            mapfile -t found < <(find . -type f -name '*.jar' -not -path './.git/*' | sort || true)
+            if (( ${#found[@]} == 0 )); then
+              echo "❌ No JAR files found to sign"
+              exit 1
+            fi
+            printf '%s\n' "${found[@]}" > jars.txt
+          fi
+
+          echo "✅ JARs to sign:"
+          cat jars.txt
+
+      - name: Discover signing alias (PrivateKeyEntry)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HINT="${SIGNUM_CERT_ALIAS:-}"
+          echo "Alias hint (optional): ${HINT:-<none>}"
+
+          # List keystore entries via PKCS#11 provider
+          keytool -J--add-modules=jdk.crypto.cryptoki \
+            -list -v \
+            -keystore NONE \
+            -storetype PKCS11 \
+            -storepass NONE \
+            -providerClass sun.security.pkcs11.SunPKCS11 \
+            -providerArg "$PKCS11_CFG" > pkcs11-list.txt
+
+          # Extract aliases where Entry type == PrivateKeyEntry
+          awk '
+            BEGIN{alias=""; type=""}
+            /^Alias name: /{alias=$0; sub(/^Alias name: /,"",alias)}
+            /^Entry type: /{
+              type=$0; sub(/^Entry type: /,"",type);
+              if (type=="PrivateKeyEntry") print alias
+            }' pkcs11-list.txt > private_aliases.txt
+
+          if [[ ! -s private_aliases.txt ]]; then
+            echo "❌ No PrivateKeyEntry found in PKCS#11 keystore; cannot sign."
+            tail -n 120 pkcs11-list.txt || true
+            exit 1
+          fi
+
+          echo "✅ PrivateKeyEntry aliases found:"
+          nl -ba private_aliases.txt
+
+          CHOSEN=""
+          if [[ -n "$HINT" ]] && grep -Fxq "$HINT" private_aliases.txt; then
+            CHOSEN="$HINT"
+            echo "✅ Using provided alias: $CHOSEN"
+          else
+            CHOSEN="$(head -n 1 private_aliases.txt)"
+            if [[ -n "$HINT" ]]; then
+              echo "⚠️ Provided alias '$HINT' is not a PrivateKeyEntry; using '$CHOSEN' instead."
+            else
+              echo "✅ Using first PrivateKeyEntry alias: $CHOSEN"
+            fi
+          fi
+
+          echo "SIGNING_ALIAS=$CHOSEN" >> "$GITHUB_ENV"
+
+      - name: Sign JARs (jarsigner) + verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SIGNING_ALIAS:?Missing SIGNING_ALIAS}"
+
+          mkdir -p "$SIGNED_DIR"
+          > "$SIGNED_DIR/manifest.txt"
+          > "$SIGNED_DIR/SHA256SUMS.txt"
+
+          while IFS= read -r SRC; do
+            [[ -f "$SRC" ]] || { echo "Skipping missing: $SRC"; continue; }
+
+            REL="${SRC#./}"
+            REL_DIR="$(dirname "$REL")"
+            BASE="$(basename "$SRC" .jar)"
+
+            DEST_DIR="$SIGNED_DIR/$REL_DIR"
+            mkdir -p "$DEST_DIR"
+
+            DEST="$DEST_DIR/${BASE}-signed.jar"
+
+            echo "→ Signing $SRC as '$SIGNING_ALIAS'"
+            jarsigner -J--add-modules=jdk.crypto.cryptoki \
+              -keystore NONE \
+              -storetype PKCS11 \
+              -storepass NONE \
+              -providerClass sun.security.pkcs11.SunPKCS11 \
+              -providerArg "$PKCS11_CFG" \
+              ${SIGNUM_TSA_URL:+-tsa "$SIGNUM_TSA_URL"} \
+              -signedjar "$DEST" \
+              "$SRC" \
+              "$SIGNING_ALIAS"
+
+            echo "→ Verifying $DEST"
+            jarsigner -J--add-modules=jdk.crypto.cryptoki -verify -verbose -certs "$DEST"
+
+            sha256sum "$DEST" >> "$SIGNED_DIR/SHA256SUMS.txt"
+            echo "$SRC -> $DEST" >> "$SIGNED_DIR/manifest.txt"
+          done < jars.txt
+
+      - name: Upload signed jars + diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-jars
+          path: |
+            out/signed/**
+            pkcs11-list.txt
+            private_aliases.txt
+            jars.txt
+
+      - name: Upload agent log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyfactor-service-log
+          path: /var/log/KeyfactorService.log
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Keyfactor Signum JAR Signing"
+            echo "- Alias: \`${SIGNING_ALIAS:-<none>}\`"
+            echo "- TSA: \`${SIGNUM_TSA_URL:-<none>}\`"
+            echo "- Output: \`out/signed/\`"
+            if [[ -f out/signed/manifest.txt ]]; then
+              echo ""
+              echo "#### Manifest"
+              sed 's/^/- /' out/signed/manifest.txt
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
