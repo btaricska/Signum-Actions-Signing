@@ -59,7 +59,6 @@ jobs:
           EOF
           sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
-          # Safe sanity print (redacts auth)
           cat "$DOCKER_CONFIG/config.json" | sed 's/"auth":[[:space:]]*".*"/"auth":"***"/'
 
       - name: Prepare files directory (host permissions)
@@ -68,8 +67,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$FILES_DIR"
           chmod -R a+rwx "$FILES_DIR"
+          ls -la "$FILES_DIR"
 
-      - name: Start Signum Agent container (tools image 4.40.1)
+      - name: Start Signum Agent container
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -82,6 +82,7 @@ jobs:
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
           docker pull "$SIGNUM_AGENT_IMAGE"
 
+          # IMPORTANT: supported levels are NONE|LOW|MEDIUM|HIGH
           docker run -d \
             --name "$CONTAINER_NAME" \
             --privileged \
@@ -99,15 +100,28 @@ jobs:
           for i in {1..30}; do
             if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
               echo "❌ Container exited early. Logs:"
-              docker logs "$CONTAINER_NAME" | tail -n 250 || true
+              docker logs "$CONTAINER_NAME" | tail -n 400 || true
               exit 1
             fi
             sleep 1
           done
-
           echo "✅ Container is running"
-          echo "📋 Container details:"
-          docker ps --filter "name=$CONTAINER_NAME" --no-trunc
+
+          echo "⏳ Waiting for agent readiness..."
+          for i in {1..60}; do
+            LOGS="$(docker logs "$CONTAINER_NAME" 2>&1 | tail -n 400 || true)"
+            if echo "$LOGS" | grep -q "Invalid value for loglevel parameter"; then
+              echo "❌ Agent rejected loglevel. Recent logs:"
+              echo "$LOGS"
+              exit 1
+            fi
+            if echo "$LOGS" | grep -q "Application started"; then
+              echo "✅ Agent started"
+              break
+            fi
+            sleep 2
+          done
+
           echo "📋 Recent logs:"
           docker logs "$CONTAINER_NAME" | tail -n 250 || true
 
@@ -117,12 +131,11 @@ jobs:
           set -euo pipefail
           mkdir -p "$FILES_DIR"
           echo '{"message":"Hello from Signum + PKCS11 demo"}' > "$FILES_DIR/file.json"
-          echo "✅ JSON file created at $FILES_DIR/file.json"
-          : > "$FILES_DIR/file.json.sig"
-          chmod 666 "$FILES_DIR/file.json.sig"
+          rm -f "$FILES_DIR/file.json.sig" || true
+          echo "✅ Created $FILES_DIR/file.json"
           ls -la "$FILES_DIR"
 
-      - name: PKCS#11 inventory + sign JSON (robust + verbose)
+      - name: PKCS#11 inventory + sign JSON (hard checks)
         shell: bash
         env:
           USER_PIN: ${{ secrets.USER_PIN }}
@@ -132,122 +145,81 @@ jobs:
           CONTAINER_FILE="/mnt/$FILES_DIR/file.json"
           CONTAINER_SIG="/mnt/$FILES_DIR/file.json.sig"
 
-          echo "ℹ️ Context:"
-          echo "  event=${{ github.event_name }}"
-          echo "  ref=${{ github.ref }}"
-          echo "  actor=${{ github.actor }}"
+          echo "✅ Verify input inside container:"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$CONTAINER_FILE' && test -s '$CONTAINER_FILE'"
 
-          echo "✅ Verifying input file exists inside the container..."
-          docker exec "$CONTAINER_NAME" test -f "$CONTAINER_FILE" || { echo "❌ Input file not found: $CONTAINER_FILE"; exit 1; }
-
-          echo "🔍 PKCS#11 module path: $PKCS11_MODULE"
-          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_MODULE'"
-
-          echo "🔍 PKCS#11 module dependency check (ldd):"
-          docker exec "$CONTAINER_NAME" sh -lc "ldd '$PKCS11_MODULE' || true"
-
-          echo "🔍 pkcs11-tool version:"
+          echo "🔍 PKCS#11 module + deps:"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_MODULE' && (ldd '$PKCS11_MODULE' || true)"
           docker exec "$CONTAINER_NAME" sh -lc "pkcs11-tool --version || true"
 
-          echo "🔍 Listing slots (verbose) with retries..."
+          echo "🔍 List slots (retry)..."
           SLOTS_OUT=""
-          RC=1
           for i in {1..20}; do
             set +e
-            SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-              --module "$PKCS11_MODULE" \
-              --list-slots \
-              --verbose 2>&1)"
+            SLOTS_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --list-slots --verbose 2>&1)"
             RC=$?
             set -e
-
             if [ "$RC" -eq 0 ]; then
               echo "$SLOTS_OUT"
               break
             fi
-
-            echo "⚠️ pkcs11-tool --list-slots failed (attempt $i/20, rc=$RC). Output (tail):"
+            echo "⚠️ list-slots failed (attempt $i/20, rc=$RC):"
             echo "$SLOTS_OUT" | tail -n 200
-
-            echo "📋 Tail of Signum Agent container logs:"
             docker logs "$CONTAINER_NAME" | tail -n 200 || true
-
             sleep 3
           done
-
-          if [ "$RC" -ne 0 ]; then
-            echo "❌ Unable to enumerate PKCS#11 slots after retries."
-            exit "$RC"
+          if [ "${RC:-1}" -ne 0 ]; then
+            echo "❌ Unable to enumerate PKCS#11 slots."
+            exit "${RC:-1}"
           fi
 
           SLOT="$(echo "$SLOTS_OUT" | awk '/^Slot [0-9]+/ {gsub("Slot ",""); gsub(":",""); print $1; exit}')"
           if [ -z "${SLOT:-}" ]; then
-            echo "❌ No slots found in output."
+            echo "❌ No slots parsed."
             exit 1
           fi
           echo "✅ Using slot: $SLOT"
 
-          echo "🔑 Listing private keys in slot $SLOT (verbose) with retries..."
+          echo "🔑 List private keys (retry)..."
           PRIV_OUT=""
-          RC=1
           for i in {1..10}; do
             set +e
-            PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
-              --module "$PKCS11_MODULE" \
-              --slot "$SLOT" \
-              --list-objects --type privkey \
-              --verbose 2>&1)"
+            PRIV_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool --module "$PKCS11_MODULE" --slot "$SLOT" --list-objects --type privkey --verbose 2>&1)"
             RC=$?
             set -e
-
+            echo "$PRIV_OUT"
             if [ "$RC" -eq 0 ] && echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
-              echo "$PRIV_OUT"
               break
             fi
-
-            echo "⚠️ pkcs11-tool --list-objects failed or no privkeys (attempt $i/10, rc=$RC). Output (tail):"
-            echo "$PRIV_OUT" | tail -n 200
-
-            echo "📋 Tail of Signum Agent container logs:"
-            docker logs "$CONTAINER_NAME" | tail -n 200 || true
-
+            echo "⚠️ list-objects failed/no keys (attempt $i/10, rc=$RC)"
             sleep 3
           done
-
-          if [ "$RC" -ne 0 ]; then
-            echo "❌ Failed to list private keys (rc=$RC)."
-            exit "$RC"
-          fi
-
-          if ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
-            echo "❌ No private key objects visible in slot $SLOT."
+          if [ "$RC" -ne 0 ] || ! echo "$PRIV_OUT" | grep -qi "Private Key Object"; then
+            echo "❌ No private key objects visible."
             exit 1
           fi
 
-          KEY_ID="$(echo "$PRIV_OUT" \
-            | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' \
-            | head -n 1 \
-            | tr -d '\r ' \
-            | grep -E '^[0-9A-Fa-f]+$' || true)"
-
+          KEY_ID="$(echo "$PRIV_OUT" | sed -n 's/^[[:space:]]*ID:[[:space:]]*//p' | head -n 1 | tr -d '\r ' | grep -E '^[0-9A-Fa-f]+$' || true)"
           if [ -z "${KEY_ID:-}" ]; then
-            echo "❌ Could not determine first key ID."
+            echo "❌ Could not determine key ID."
             exit 1
           fi
+          echo "✅ Using key ID: $KEY_ID"
 
-          echo "✅ Using first private key ID: $KEY_ID"
+          echo "🧹 Ensure sig file does not exist inside container (avoid stale/empty):"
+          docker exec "$CONTAINER_NAME" sh -lc "rm -f '$CONTAINER_SIG' && ls -la /mnt/$FILES_DIR"
 
           LOGIN_ARGS=()
           if [ -n "${USER_PIN:-}" ]; then
             LOGIN_ARGS=(--login --pin "$USER_PIN")
-            echo "🔐 USER_PIN provided; will sign with --login."
+            echo "🔐 Using --login"
           else
-            echo "ℹ️ No USER_PIN provided; will sign without login."
+            echo "ℹ️ No USER_PIN provided; signing without login"
           fi
 
-          echo "✍️ Signing (verbose)..."
+          echo "✍️ Sign..."
           set +e
-          OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
+          SIGN_OUT="$(docker exec "$CONTAINER_NAME" pkcs11-tool \
             --module "$PKCS11_MODULE" \
             --slot "$SLOT" \
             "${LOGIN_ARGS[@]}" \
@@ -259,21 +231,26 @@ jobs:
             --verbose 2>&1)"
           RC=$?
           set -e
-
-          echo "$OUT"
-          echo "pkcs11-tool exit code: $RC"
-
+          echo "$SIGN_OUT"
+          echo "pkcs11-tool sign rc=$RC"
           if [ "$RC" -ne 0 ]; then
-            echo "❌ Signing failed"
-            echo "📋 Tail of Signum Agent container logs:"
-            docker logs "$CONTAINER_NAME" | tail -n 250 || true
+            echo "❌ Signing command failed"
             exit "$RC"
           fi
 
-          echo "✅ Signature written to $FILES_DIR/file.json.sig"
-          ls -la "$FILES_DIR"
-          echo "✅ Signature file preview (hex, first 128 bytes):"
-          head -c 128 "$FILES_DIR/file.json.sig" | xxd -g 1 || true
+          echo "✅ Verify signature file created INSIDE container and is non-empty:"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$CONTAINER_SIG' && test -s '$CONTAINER_SIG'"
+
+          echo "✅ Verify signature file exists on HOST and is non-empty:"
+          ls -la "$FILES_DIR/file.json.sig"
+          if [ ! -s "$FILES_DIR/file.json.sig" ]; then
+            echo "❌ Host signature file is empty. Container file is:"
+            docker exec "$CONTAINER_NAME" sh -lc "ls -la '$CONTAINER_SIG' && (wc -c '$CONTAINER_SIG' || true) && (head -c 32 '$CONTAINER_SIG' | xxd -g 1 || true)"
+            exit 1
+          fi
+
+          echo "✅ Signature size (bytes):"
+          wc -c "$FILES_DIR/file.json.sig"
 
       - name: Upload signature artifact
         uses: actions/upload-artifact@v4
@@ -288,5 +265,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker logs "$CONTAINER_NAME" | tail -n 250 || true
+          docker logs "$CONTAINER_NAME" | tail -n 400 || true
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
