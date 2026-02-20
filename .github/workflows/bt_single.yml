@@ -90,7 +90,7 @@ jobs:
             -e SIGNUM_CLIENTID \
             -e SIGNUM_USERNAME \
             -e SIGNUM_PASSWORD \
-            -e SIGNUM_LOGLEVEL=VERBOSE \
+            -e SIGNUM_LOGLEVEL=HIGH \
             -e SIGNUM_LOGTYPE=FILE \
             -v "$PWD:/mnt" \
             "$SIGNUM_AGENT_IMAGE"
