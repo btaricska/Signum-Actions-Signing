@@ -1,4 +1,4 @@
-name: "Keyfactor Signum Jar Signing (JFrog image)"
+name: "Keyfactor Signum Jar Signing (JFrog)"
 
 on:
   workflow_dispatch:
@@ -18,23 +18,24 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # JFrog-hosted tools image you already use successfully
       SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/signum-bdewberry-testing-docker/signum-linux-agent-tools:4.40.1
       CONTAINER_NAME: signum-agent
       DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
-      # Signum creds (repo secrets, same as your working workflow)
-      # NOTE: names match your existing secrets
       PKCS11_CFG: /etc/keyfactor/keyfactorpkcs11.cfg
       SIGNED_DIR: out/signed
 
-      # Optional: set this as a repo secret or variable if you want to pin the alias
-      # Otherwise we will auto-discover the first PrivateKeyEntry alias
+      # Optional: set as a GitHub Actions Variable (not secret)
       SIGNUM_CERT_ALIAS: ${{ vars.SIGNUM_CERT_ALIAS }}
+      # Optional TSA (variable); if set, we’ll use it
+      SIGNUM_TSA_URL: ${{ vars.SIGNUM_TSA_URL }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
 
       - name: Validate secrets
         shell: bash
@@ -74,7 +75,46 @@ jobs:
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
           cat "$DOCKER_CONFIG/config.json" | sed 's/"auth":[[:space:]]*".*"/"auth":"***"/'
 
-      - name: Start Signum Agent container
+      - name: Ensure a JAR exists to sign (use input, existing demo, or build demo)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+
+          # Use workflow input if provided
+          if [ -n "${{ inputs.jar_path }}" ]; then
+            test -f "${{ inputs.jar_path }}" || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
+            printf '%s\n' "${{ inputs.jar_path }}" > out/jars.txt
+            echo "✅ Using jar_path input:"
+            cat out/jars.txt
+            exit 0
+          fi
+
+          # Prefer the canonical demo jar path from your doc
+          if [ -f "apps/hello/app_unsigned.jar" ]; then
+            echo "apps/hello/app_unsigned.jar" > out/jars.txt
+            echo "✅ Found apps/hello/app_unsigned.jar"
+            exit 0
+          fi
+
+          # If Hello.java exists, build demo jar on the runner (simple + reliable)
+          if [ -f "apps/hello/Hello.java" ]; then
+            echo "⚙️ No JAR found; building apps/hello/app_unsigned.jar from Hello.java"
+            mkdir -p apps/hello/build
+            javac -d apps/hello/build apps/hello/Hello.java
+            jar --create --file apps/hello/app_unsigned.jar -C apps/hello/build .
+            echo "apps/hello/app_unsigned.jar" > out/jars.txt
+            ls -la apps/hello/app_unsigned.jar
+            echo "✅ Built demo jar and staged jars list:"
+            cat out/jars.txt
+            exit 0
+          fi
+
+          echo "❌ No JAR found and no apps/hello/Hello.java to build one."
+          echo "➡️ Add a JAR to the repo or add apps/hello/Hello.java."
+          exit 1
+
+      - name: Start Signum Agent container (JFrog image)
         shell: bash
         env:
           SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
@@ -87,7 +127,6 @@ jobs:
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
           docker pull "$SIGNUM_AGENT_IMAGE"
 
-          # Mount the repo root at /work inside container
           docker run -d \
             --name "$CONTAINER_NAME" \
             --privileged \
@@ -111,7 +150,6 @@ jobs:
             sleep 1
           done
           echo "✅ Container is running"
-          docker logs "$CONTAINER_NAME" | tail -n 200 || true
 
       - name: Configure agent + start service inside container
         shell: bash
@@ -123,16 +161,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Create pkcs11 cfg (safe to overwrite)
           docker exec "$CONTAINER_NAME" sh -lc "install -d /etc/keyfactor"
+
           docker exec "$CONTAINER_NAME" sh -lc "cat > '$PKCS11_CFG' <<'EOF'
           name = KeyfactorPKCS11
           library = /usr/lib/libkeyfactorpkcs11.so
           description = \"Keyfactor PKCS#11 interface\"
           EOF"
+
           docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_CFG' && test -f /usr/lib/libkeyfactorpkcs11.so"
 
-          # Run keyfactor-setup (IMPORTANT: loglevel must be NONE|LOW|MEDIUM|HIGH)
           docker exec "$CONTAINER_NAME" sh -lc "
             set -euo pipefail
             keyfactor-setup \
@@ -144,63 +182,35 @@ jobs:
               logtype=FILE
           "
 
-          # Start service (background) and wait for port 51599
           docker exec "$CONTAINER_NAME" sh -lc '
             set -euo pipefail
             SVC_DIR=/usr/local/keyfactor/service
             LOG=/var/log/KeyfactorService.log
-
             if [ -x "$SVC_DIR/KeyfactorService" ]; then
               "$SVC_DIR/KeyfactorService" >>"$LOG" 2>&1 &
             else
               dotnet "$SVC_DIR/KeyfactorService.dll" >>"$LOG" 2>&1 &
             fi
-
             for i in $(seq 1 120); do
               (exec 3<>/dev/tcp/127.0.0.1/51599) >/dev/null 2>&1 && { echo "agent listening"; exit 0; }
               sleep 1
             done
-
             echo "Agent did not open 127.0.0.1:51599 in time"
             tail -n 200 "$LOG" || true
             exit 1
           '
 
-          # Smoke test
           docker exec "$CONTAINER_NAME" sh -lc 'keyfactor-setup test || (tail -n 200 /var/log/KeyfactorService.log; exit 1)'
 
-      - name: Discover JARs to sign (host)
-        id: jars
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          > out/jars.txt
-
-          if [ -n "${{ inputs.jar_path }}" ]; then
-            test -f "${{ inputs.jar_path }}" || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
-            printf '%s\n' "${{ inputs.jar_path }}" > out/jars.txt
-          else
-            find . -type f -name '*.jar' -not -path './.git/*' | sort > out/jars.txt || true
-          fi
-
-          if [ ! -s out/jars.txt ]; then
-            echo "❌ No JAR files found to sign"
-            exit 1
-          fi
-
-          echo "✅ JARs:"
-          cat out/jars.txt
-
-      - name: Discover PrivateKeyEntry alias (container via keytool)
+      - name: Discover PrivateKeyEntry alias (keytool in container)
         shell: bash
         run: |
           set -euo pipefail
 
-          # Run keytool in container, output files into /work/out so they persist on host
           docker exec "$CONTAINER_NAME" sh -lc "
             set -euo pipefail
             cd /work
+            mkdir -p out
             keytool -J--add-modules=jdk.crypto.cryptoki \
               -list -v -keystore NONE \
               -storetype PKCS11 -storepass NONE \
@@ -215,40 +225,27 @@ jobs:
                 if (type==\"PrivateKeyEntry\") { print alias }
               }' out/pkcs11-list.txt > out/private_aliases.txt
 
-            if [ ! -s out/private_aliases.txt ]; then
-              echo \"❌ No PrivateKeyEntry found\" >&2
-              tail -n 120 out/pkcs11-list.txt >&2 || true
-              exit 1
-            fi
-
+            test -s out/private_aliases.txt
             echo \"✅ PrivateKeyEntry aliases:\"
             nl -ba out/private_aliases.txt
           "
 
-          # Choose alias on host side (prefer env SIGNUM_CERT_ALIAS if valid)
-          set -euo pipefail
           HINT="${SIGNUM_CERT_ALIAS:-}"
-          CHOSEN=""
           if [ -n "$HINT" ] && grep -Fxq "$HINT" out/private_aliases.txt; then
-            CHOSEN="$HINT"
-            echo "✅ Using provided SIGNUM_CERT_ALIAS: $CHOSEN"
+            echo "SIGNING_ALIAS=$HINT" >> "$GITHUB_ENV"
+            echo "✅ Using provided SIGNUM_CERT_ALIAS"
           else
             CHOSEN="$(head -n 1 out/private_aliases.txt)"
-            if [ -n "$HINT" ]; then
-              echo "⚠️ Provided alias not a PrivateKeyEntry; using: $CHOSEN"
-            else
-              echo "✅ Using first PrivateKeyEntry alias: $CHOSEN"
-            fi
+            echo "SIGNING_ALIAS=$CHOSEN" >> "$GITHUB_ENV"
+            echo "✅ Using discovered alias: $CHOSEN"
           fi
-          echo "SIGNING_ALIAS=$CHOSEN" >> "$GITHUB_ENV"
 
-      - name: Sign JARs (container jarsigner) + verify
+      - name: Sign JAR(s) with jarsigner + verify
         shell: bash
         run: |
           set -euo pipefail
           : "${SIGNING_ALIAS:?Missing SIGNING_ALIAS}"
 
-          # Sign inside container; input jars are in /work (repo mount)
           docker exec "$CONTAINER_NAME" sh -lc "
             set -euo pipefail
             cd /work
@@ -262,7 +259,6 @@ jobs:
               REL=\${SRC#./}
               REL_DIR=\$(dirname \"\$REL\")
               BASE=\$(basename \"\$SRC\" .jar)
-
               DEST_DIR='$SIGNED_DIR'/\"\$REL_DIR\"
               mkdir -p \"\$DEST_DIR\"
               DEST=\"\$DEST_DIR/\${BASE}-signed.jar\"
@@ -273,6 +269,7 @@ jobs:
                 -storetype PKCS11 -storepass NONE \
                 -providerClass sun.security.pkcs11.SunPKCS11 \
                 -providerArg '$PKCS11_CFG' \
+                ${SIGNUM_TSA_URL:+-tsa \"$SIGNUM_TSA_URL\"} \
                 -signedjar \"\$DEST\" \"\$SRC\" '$SIGNING_ALIAS'
 
               echo \"→ Verifying \$DEST\"
@@ -283,25 +280,15 @@ jobs:
             done < out/jars.txt
           "
 
-          echo "✅ Signed outputs on host:"
-          find out/signed -type f -name '*-signed.jar' -maxdepth 10 -print || true
-
       - name: Upload signed jars + diagnostics
         uses: actions/upload-artifact@v4
         with:
           name: signed-jars
           path: |
-            out/signed/**
             out/jars.txt
             out/pkcs11-list.txt
             out/private_aliases.txt
-
-      - name: Upload agent log (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: keyfactor-service-log
-          path: /var/log/KeyfactorService.log
+            out/signed/**
 
       - name: Cleanup container
         if: always()
