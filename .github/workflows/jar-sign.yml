@@ -25,9 +25,8 @@ jobs:
       PKCS11_CFG: /etc/keyfactor/keyfactorpkcs11.cfg
       SIGNED_DIR: out/signed
 
-      # Optional: set as a GitHub Actions Variable (not secret)
+      # Optional variables (not secrets)
       SIGNUM_CERT_ALIAS: ${{ vars.SIGNUM_CERT_ALIAS }}
-      # Optional TSA (variable); if set, we’ll use it
       SIGNUM_TSA_URL: ${{ vars.SIGNUM_TSA_URL }}
 
     steps:
@@ -75,44 +74,54 @@ jobs:
           echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
           cat "$DOCKER_CONFIG/config.json" | sed 's/"auth":[[:space:]]*".*"/"auth":"***"/'
 
-      - name: Ensure a JAR exists to sign (use input, existing demo, or build demo)
+      - name: Ensure a JAR exists to sign (discover or generate one)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
 
-          # Use workflow input if provided
+          echo "📂 Repo top-level:"
+          ls -la
+
+          echo "📂 apps/ (if present):"
+          ls -la apps || true
+
+          echo "🔎 Searching for any .jar files..."
+          find . -type f -name '*.jar' -not -path './.git/*' | sort > out/jars.txt || true
+
+          # If input jar_path provided, use it (and override discovery)
           if [ -n "${{ inputs.jar_path }}" ]; then
             test -f "${{ inputs.jar_path }}" || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
             printf '%s\n' "${{ inputs.jar_path }}" > out/jars.txt
-            echo "✅ Using jar_path input:"
+          fi
+
+          if [ -s out/jars.txt ]; then
+            echo "✅ JAR(s) to sign:"
             cat out/jars.txt
             exit 0
           fi
 
-          # Prefer the canonical demo jar path from your doc
-          if [ -f "apps/hello/app_unsigned.jar" ]; then
-            echo "apps/hello/app_unsigned.jar" > out/jars.txt
-            echo "✅ Found apps/hello/app_unsigned.jar"
-            exit 0
-          fi
+          echo "⚙️ No JAR found in repo. Generating a demo JAR on the fly..."
 
-          # If Hello.java exists, build demo jar on the runner (simple + reliable)
-          if [ -f "apps/hello/Hello.java" ]; then
-            echo "⚙️ No JAR found; building apps/hello/app_unsigned.jar from Hello.java"
-            mkdir -p apps/hello/build
-            javac -d apps/hello/build apps/hello/Hello.java
-            jar --create --file apps/hello/app_unsigned.jar -C apps/hello/build .
-            echo "apps/hello/app_unsigned.jar" > out/jars.txt
-            ls -la apps/hello/app_unsigned.jar
-            echo "✅ Built demo jar and staged jars list:"
-            cat out/jars.txt
-            exit 0
-          fi
+          mkdir -p out/demo/src/hello out/demo/build
+          cat > out/demo/src/hello/Hello.java <<'EOF'
+          package hello;
+          public class Hello {
+              public static void main(String[] args) {
+                  System.out.println("Hello, Signum!");
+              }
+          }
+          EOF
 
-          echo "❌ No JAR found and no apps/hello/Hello.java to build one."
-          echo "➡️ Add a JAR to the repo or add apps/hello/Hello.java."
-          exit 1
+          javac -d out/demo/build out/demo/src/hello/Hello.java
+          jar --create --file out/demo/app_unsigned.jar -C out/demo/build .
+
+          echo "✅ Built demo jar: out/demo/app_unsigned.jar"
+          ls -la out/demo/app_unsigned.jar
+
+          echo "out/demo/app_unsigned.jar" > out/jars.txt
+          echo "✅ JARs staged:"
+          cat out/jars.txt
 
       - name: Start Signum Agent container (JFrog image)
         shell: bash
