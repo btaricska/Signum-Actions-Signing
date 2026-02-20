@@ -1,231 +1,290 @@
-name: "Keyfactor Signum Jar Signing"
+name: "Keyfactor Signum Jar Signing (JFrog image)"
 
 on:
-  push:
-    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       jar_path:
         description: "Optional path to a specific JAR to sign (e.g., apps/hello/app_unsigned.jar)"
         required: false
         type: string
+  push:
+    tags: ["v*.*.*"]
 
-# Use the same minimal permissions pattern as your earlier workflow
 permissions:
   contents: read
-  packages: read
 
 jobs:
   sign:
     runs-on: ubuntu-latest
-    environment: signum
-
-    # Job runs inside the container image
-    container:
-      image: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}/signum-agent:v4.40.1
-      # IMPORTANT: container jobs must be able to pull BEFORE any steps run
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
 
     env:
-      SIGNUM_HOST: ${{ secrets.SIGNUM_HOST }}
-      SIGNUM_CLIENT_ID: ${{ secrets.SIGNUM_CLIENT_ID }}
-      SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
-      SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
-      SIGNUM_CERT_ALIAS: ${{ vars.SIGNUM_CERT_ALIAS }}
-      SIGNUM_TSA_URL: ${{ vars.SIGNUM_TSA_URL }}
+      # JFrog-hosted tools image you already use successfully
+      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/signum-bdewberry-testing-docker/signum-linux-agent-tools:4.40.1
+      CONTAINER_NAME: signum-agent
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker
 
+      # Signum creds (repo secrets, same as your working workflow)
+      # NOTE: names match your existing secrets
       PKCS11_CFG: /etc/keyfactor/keyfactorpkcs11.cfg
       SIGNED_DIR: out/signed
 
+      # Optional: set this as a repo secret or variable if you want to pin the alias
+      # Otherwise we will auto-discover the first PrivateKeyEntry alias
+      SIGNUM_CERT_ALIAS: ${{ vars.SIGNUM_CERT_ALIAS }}
+
     steps:
-      - name: Install git + git-lfs (needed inside container for checkout)
-        shell: bash
-        run: |
-          set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends git git-lfs ca-certificates
-          git lfs install --system
-
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
 
-      - name: Validate required secrets
+      - name: Validate secrets
         shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
         run: |
           set -euo pipefail
-          for v in SIGNUM_HOST SIGNUM_CLIENT_ID SIGNUM_USERNAME SIGNUM_PASSWORD; do
-            [[ -n "${!v:-}" ]] || { echo "❌ Missing $v in Environment 'signum' secrets"; exit 1; }
-          done
-          echo "✅ Required secrets present"
-
-      - name: Stage PKCS#11 cfg & verify library
-        shell: bash
-        run: |
-          set -euo pipefail
-          install -d /etc/keyfactor
-          cat > "$PKCS11_CFG" <<'EOF'
-          name = KeyfactorPKCS11
-          library = /usr/lib/libkeyfactorpkcs11.so
-          description = "Keyfactor PKCS#11 interface"
-          EOF
-          test -f /usr/lib/libkeyfactorpkcs11.so || { echo "❌ missing /usr/lib/libkeyfactorpkcs11.so"; exit 1; }
-          echo "✅ PKCS#11 cfg created at $PKCS11_CFG"
-
-      - name: Configure Signum agent (keyfactor-setup)
-        shell: bash
-        run: |
-          set -euo pipefail
-          keyfactor-setup \
-            hostname="$SIGNUM_HOST" \
-            clientid="$SIGNUM_CLIENT_ID" \
-            username="$SIGNUM_USERNAME" \
-            password="$SIGNUM_PASSWORD" \
-            loglevel=HIGH \
-            logtype=FILE
-
-      - name: Start agent service & wait for port
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SVC_DIR=/usr/local/keyfactor/service
-          LOG=/var/log/KeyfactorService.log
-
-          if [[ -x "$SVC_DIR/KeyfactorService" ]]; then
-            "$SVC_DIR/KeyfactorService" >>"$LOG" 2>&1 &
-          else
-            dotnet "$SVC_DIR/KeyfactorService.dll" >>"$LOG" 2>&1 &
-          fi
-
-          for i in $(seq 1 120); do
-            (exec 3<>/dev/tcp/127.0.0.1/51599) >/dev/null 2>&1 && { echo "✅ agent listening on 127.0.0.1:51599"; exit 0; }
-            sleep 1
-          done
-
-          echo "❌ Agent did not open 127.0.0.1:51599 in time"
-          tail -n 250 "$LOG" || true
-          exit 1
-
-      - name: keyfactor-setup test
-        shell: bash
-        run: |
-          set -euo pipefail
-          keyfactor-setup test || (echo "❌ keyfactor-setup test failed"; tail -n 250 /var/log/KeyfactorService.log || true; exit 1)
-
-      - name: Discover JARs to sign
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$SIGNED_DIR"
-          > jars.txt
-
-          if [[ -n "${{ inputs.jar_path }}" ]]; then
-            [[ -f "${{ inputs.jar_path }}" ]] || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
-            printf '%s\n' "${{ inputs.jar_path }}" > jars.txt
-          else
-            mapfile -t found < <(find . -type f -name '*.jar' -not -path './.git/*' | sort || true)
-            if (( ${#found[@]} == 0 )); then
-              echo "❌ No JAR files found to sign"
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
+            if [ -z "${!s:-}" ]; then
+              echo "❌ Missing secret: $s"
               exit 1
             fi
-            printf '%s\n' "${found[@]}" > jars.txt
-          fi
+          done
+          echo "✅ Secrets validated"
 
-          echo "✅ JARs to sign:"
-          cat jars.txt
+      - name: Configure Docker auth (JFrog)
+        shell: bash
+        env:
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          cat > "$DOCKER_CONFIG/config.json" <<'EOF'
+          {
+            "auths": {
+              "keyfactor.jfrog.io": {
+                "auth": "__AUTH__"
+              }
+            }
+          }
+          EOF
+          sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
+          echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
+          cat "$DOCKER_CONFIG/config.json" | sed 's/"auth":[[:space:]]*".*"/"auth":"***"/'
 
-      - name: Discover signing alias (PrivateKeyEntry)
+      - name: Start Signum Agent container
+        shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+          docker pull "$SIGNUM_AGENT_IMAGE"
+
+          # Mount the repo root at /work inside container
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --privileged \
+            --user 0:0 \
+            -e SIGNUM_HOSTNAME \
+            -e SIGNUM_CLIENTID \
+            -e SIGNUM_USERNAME \
+            -e SIGNUM_PASSWORD \
+            -e SIGNUM_LOGLEVEL=HIGH \
+            -e SIGNUM_LOGTYPE=FILE \
+            -v "$PWD:/work" \
+            "$SIGNUM_AGENT_IMAGE"
+
+          echo "⏳ Waiting for container to stay up..."
+          for i in {1..30}; do
+            if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+              echo "❌ Container exited early. Logs:"
+              docker logs "$CONTAINER_NAME" | tail -n 300 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ Container is running"
+          docker logs "$CONTAINER_NAME" | tail -n 200 || true
+
+      - name: Configure agent + start service inside container
+        shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # Create pkcs11 cfg (safe to overwrite)
+          docker exec "$CONTAINER_NAME" sh -lc "install -d /etc/keyfactor"
+          docker exec "$CONTAINER_NAME" sh -lc "cat > '$PKCS11_CFG' <<'EOF'
+          name = KeyfactorPKCS11
+          library = /usr/lib/libkeyfactorpkcs11.so
+          description = \"Keyfactor PKCS#11 interface\"
+          EOF"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_CFG' && test -f /usr/lib/libkeyfactorpkcs11.so"
+
+          # Run keyfactor-setup (IMPORTANT: loglevel must be NONE|LOW|MEDIUM|HIGH)
+          docker exec "$CONTAINER_NAME" sh -lc "
+            set -euo pipefail
+            keyfactor-setup \
+              hostname=\"$SIGNUM_HOSTNAME\" \
+              clientid=\"$SIGNUM_CLIENTID\" \
+              username=\"$SIGNUM_USERNAME\" \
+              password=\"$SIGNUM_PASSWORD\" \
+              loglevel=HIGH \
+              logtype=FILE
+          "
+
+          # Start service (background) and wait for port 51599
+          docker exec "$CONTAINER_NAME" sh -lc '
+            set -euo pipefail
+            SVC_DIR=/usr/local/keyfactor/service
+            LOG=/var/log/KeyfactorService.log
+
+            if [ -x "$SVC_DIR/KeyfactorService" ]; then
+              "$SVC_DIR/KeyfactorService" >>"$LOG" 2>&1 &
+            else
+              dotnet "$SVC_DIR/KeyfactorService.dll" >>"$LOG" 2>&1 &
+            fi
+
+            for i in $(seq 1 120); do
+              (exec 3<>/dev/tcp/127.0.0.1/51599) >/dev/null 2>&1 && { echo "agent listening"; exit 0; }
+              sleep 1
+            done
+
+            echo "Agent did not open 127.0.0.1:51599 in time"
+            tail -n 200 "$LOG" || true
+            exit 1
+          '
+
+          # Smoke test
+          docker exec "$CONTAINER_NAME" sh -lc 'keyfactor-setup test || (tail -n 200 /var/log/KeyfactorService.log; exit 1)'
+
+      - name: Discover JARs to sign (host)
+        id: jars
         shell: bash
         run: |
           set -euo pipefail
-          HINT="${SIGNUM_CERT_ALIAS:-}"
-          echo "Alias hint (optional): ${HINT:-<none>}"
+          mkdir -p out
+          > out/jars.txt
 
-          keytool -J--add-modules=jdk.crypto.cryptoki \
-            -list -v \
-            -keystore NONE \
-            -storetype PKCS11 \
-            -storepass NONE \
-            -providerClass sun.security.pkcs11.SunPKCS11 \
-            -providerArg "$PKCS11_CFG" > pkcs11-list.txt
+          if [ -n "${{ inputs.jar_path }}" ]; then
+            test -f "${{ inputs.jar_path }}" || { echo "❌ jar_path not found: ${{ inputs.jar_path }}"; exit 1; }
+            printf '%s\n' "${{ inputs.jar_path }}" > out/jars.txt
+          else
+            find . -type f -name '*.jar' -not -path './.git/*' | sort > out/jars.txt || true
+          fi
 
-          awk '
-            BEGIN{alias=""; type=""}
-            /^Alias name: /{alias=$0; sub(/^Alias name: /,"",alias)}
-            /^Entry type: /{
-              type=$0; sub(/^Entry type: /,"",type);
-              if (type=="PrivateKeyEntry") print alias
-            }' pkcs11-list.txt > private_aliases.txt
-
-          if [[ ! -s private_aliases.txt ]]; then
-            echo "❌ No PrivateKeyEntry found in PKCS#11 keystore; cannot sign."
-            tail -n 120 pkcs11-list.txt || true
+          if [ ! -s out/jars.txt ]; then
+            echo "❌ No JAR files found to sign"
             exit 1
           fi
 
-          echo "✅ PrivateKeyEntry aliases found:"
-          nl -ba private_aliases.txt
+          echo "✅ JARs:"
+          cat out/jars.txt
 
+      - name: Discover PrivateKeyEntry alias (container via keytool)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Run keytool in container, output files into /work/out so they persist on host
+          docker exec "$CONTAINER_NAME" sh -lc "
+            set -euo pipefail
+            cd /work
+            keytool -J--add-modules=jdk.crypto.cryptoki \
+              -list -v -keystore NONE \
+              -storetype PKCS11 -storepass NONE \
+              -providerClass sun.security.pkcs11.SunPKCS11 \
+              -providerArg '$PKCS11_CFG' > out/pkcs11-list.txt
+
+            awk '
+              BEGIN{ alias=\"\"; type=\"\" }
+              /^Alias name: /{ alias=\$0; sub(/^Alias name: /,\"\",alias) }
+              /^Entry type: /{
+                type=\$0; sub(/^Entry type: /,\"\",type);
+                if (type==\"PrivateKeyEntry\") { print alias }
+              }' out/pkcs11-list.txt > out/private_aliases.txt
+
+            if [ ! -s out/private_aliases.txt ]; then
+              echo \"❌ No PrivateKeyEntry found\" >&2
+              tail -n 120 out/pkcs11-list.txt >&2 || true
+              exit 1
+            fi
+
+            echo \"✅ PrivateKeyEntry aliases:\"
+            nl -ba out/private_aliases.txt
+          "
+
+          # Choose alias on host side (prefer env SIGNUM_CERT_ALIAS if valid)
+          set -euo pipefail
+          HINT="${SIGNUM_CERT_ALIAS:-}"
           CHOSEN=""
-          if [[ -n "$HINT" ]] && grep -Fxq "$HINT" private_aliases.txt; then
+          if [ -n "$HINT" ] && grep -Fxq "$HINT" out/private_aliases.txt; then
             CHOSEN="$HINT"
-            echo "✅ Using provided alias: $CHOSEN"
+            echo "✅ Using provided SIGNUM_CERT_ALIAS: $CHOSEN"
           else
-            CHOSEN="$(head -n 1 private_aliases.txt)"
-            if [[ -n "$HINT" ]]; then
-              echo "⚠️ Provided alias '$HINT' is not a PrivateKeyEntry; using '$CHOSEN' instead."
+            CHOSEN="$(head -n 1 out/private_aliases.txt)"
+            if [ -n "$HINT" ]; then
+              echo "⚠️ Provided alias not a PrivateKeyEntry; using: $CHOSEN"
             else
               echo "✅ Using first PrivateKeyEntry alias: $CHOSEN"
             fi
           fi
-
           echo "SIGNING_ALIAS=$CHOSEN" >> "$GITHUB_ENV"
 
-      - name: Sign JARs (jarsigner) + verify
+      - name: Sign JARs (container jarsigner) + verify
         shell: bash
         run: |
           set -euo pipefail
           : "${SIGNING_ALIAS:?Missing SIGNING_ALIAS}"
 
-          mkdir -p "$SIGNED_DIR"
-          > "$SIGNED_DIR/manifest.txt"
-          > "$SIGNED_DIR/SHA256SUMS.txt"
+          # Sign inside container; input jars are in /work (repo mount)
+          docker exec "$CONTAINER_NAME" sh -lc "
+            set -euo pipefail
+            cd /work
+            mkdir -p '$SIGNED_DIR'
+            > '$SIGNED_DIR/manifest.txt'
+            > '$SIGNED_DIR/SHA256SUMS.txt'
 
-          while IFS= read -r SRC; do
-            [[ -f "$SRC" ]] || { echo "Skipping missing: $SRC"; continue; }
+            while IFS= read -r SRC; do
+              [ -f \"\$SRC\" ] || { echo \"Skipping missing: \$SRC\"; continue; }
 
-            REL="${SRC#./}"
-            REL_DIR="$(dirname "$REL")"
-            BASE="$(basename "$SRC" .jar)"
+              REL=\${SRC#./}
+              REL_DIR=\$(dirname \"\$REL\")
+              BASE=\$(basename \"\$SRC\" .jar)
 
-            DEST_DIR="$SIGNED_DIR/$REL_DIR"
-            mkdir -p "$DEST_DIR"
+              DEST_DIR='$SIGNED_DIR'/\"\$REL_DIR\"
+              mkdir -p \"\$DEST_DIR\"
+              DEST=\"\$DEST_DIR/\${BASE}-signed.jar\"
 
-            DEST="$DEST_DIR/${BASE}-signed.jar"
+              echo \"→ Signing \$SRC as '$SIGNING_ALIAS'\"
+              jarsigner -J--add-modules=jdk.crypto.cryptoki \
+                -keystore NONE \
+                -storetype PKCS11 -storepass NONE \
+                -providerClass sun.security.pkcs11.SunPKCS11 \
+                -providerArg '$PKCS11_CFG' \
+                -signedjar \"\$DEST\" \"\$SRC\" '$SIGNING_ALIAS'
 
-            echo "→ Signing $SRC as '$SIGNING_ALIAS'"
-            jarsigner -J--add-modules=jdk.crypto.cryptoki \
-              -keystore NONE \
-              -storetype PKCS11 \
-              -storepass NONE \
-              -providerClass sun.security.pkcs11.SunPKCS11 \
-              -providerArg "$PKCS11_CFG" \
-              ${SIGNUM_TSA_URL:+-tsa "$SIGNUM_TSA_URL"} \
-              -signedjar "$DEST" \
-              "$SRC" \
-              "$SIGNING_ALIAS"
+              echo \"→ Verifying \$DEST\"
+              jarsigner -J--add-modules=jdk.crypto.cryptoki -verify -verbose -certs \"\$DEST\"
 
-            echo "→ Verifying $DEST"
-            jarsigner -J--add-modules=jdk.crypto.cryptoki -verify -verbose -certs "$DEST"
+              sha256sum \"\$DEST\" >> '$SIGNED_DIR/SHA256SUMS.txt'
+              echo \"\$SRC -> \$DEST\" >> '$SIGNED_DIR/manifest.txt'
+            done < out/jars.txt
+          "
 
-            sha256sum "$DEST" >> "$SIGNED_DIR/SHA256SUMS.txt"
-            echo "$SRC -> $DEST" >> "$SIGNED_DIR/manifest.txt"
-          done < jars.txt
+          echo "✅ Signed outputs on host:"
+          find out/signed -type f -name '*-signed.jar' -maxdepth 10 -print || true
 
       - name: Upload signed jars + diagnostics
         uses: actions/upload-artifact@v4
@@ -233,9 +292,9 @@ jobs:
           name: signed-jars
           path: |
             out/signed/**
-            pkcs11-list.txt
-            private_aliases.txt
-            jars.txt
+            out/jars.txt
+            out/pkcs11-list.txt
+            out/private_aliases.txt
 
       - name: Upload agent log (on failure)
         if: failure()
@@ -243,3 +302,11 @@ jobs:
         with:
           name: keyfactor-service-log
           path: /var/log/KeyfactorService.log
+
+      - name: Cleanup container
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logs "$CONTAINER_NAME" | tail -n 300 || true
+          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
