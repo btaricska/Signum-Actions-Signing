@@ -1,4 +1,4 @@
-name: "Keyfactor Signum Jar Signing (JFrog)"
+name: "Keyfactor Signum Jar Signing (success/valid)"
 
 on:
   workflow_dispatch:
