@@ -1,0 +1,201 @@
+name: Sign EXE via Signum Agent + JSign (PKCS11)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+
+    env:
+      SIGNUM_AGENT_IMAGE: keyfactor.jfrog.io/signum-bdewberry-testing-docker/signum-linux-agent-tools:4.40.1
+      CONTAINER_NAME: signum-agent
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker
+      PKCS11_CFG: /etc/keyfactor/keyfactorpkcs11.cfg
+      JSIGN_JAR: /usr/local/keyfactor/tools/jsign-6.0.jar
+      FILES_DIR: filestosign
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate secrets
+        shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+        run: |
+          set -euo pipefail
+          for s in SIGNUM_HOSTNAME SIGNUM_CLIENTID SIGNUM_USERNAME SIGNUM_USERNAME SIGNUM_PASSWORD JFROG_DOCKER_AUTH; do
+            if [ -z "${!s:-}" ]; then
+              echo "❌ Missing secret: $s"
+              exit 1
+            fi
+          done
+          echo "✅ Secrets validated"
+
+      - name: Configure Docker auth (JFrog)
+        shell: bash
+        env:
+          JFROG_DOCKER_AUTH: ${{ secrets.JFROG_DOCKER_AUTH }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          cat > "$DOCKER_CONFIG/config.json" <<'EOF'
+          {
+            "auths": {
+              "keyfactor.jfrog.io": {
+                "auth": "__AUTH__"
+              }
+            }
+          }
+          EOF
+          sed -i "s|__AUTH__|${JFROG_DOCKER_AUTH}|g" "$DOCKER_CONFIG/config.json"
+          echo "✅ Wrote Docker auth to $DOCKER_CONFIG/config.json"
+          cat "$DOCKER_CONFIG/config.json" | sed 's/"auth":[[:space:]]*".*"/"auth":"***"/'
+
+      - name: Prepare files directory + sample EXE
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$FILES_DIR"
+          chmod -R a+rwx "$FILES_DIR"
+
+          # Put your EXE(s) in $FILES_DIR in the repo, or download/build them here.
+          # For safety, we just verify something exists. If not, fail with a clear message.
+          echo "📦 Looking for .exe files in $FILES_DIR..."
+          ls -la "$FILES_DIR" || true
+          if ! ls "$FILES_DIR"/*.exe >/dev/null 2>&1; then
+            echo "❌ No .exe found in $FILES_DIR."
+            echo "➡️ Add an EXE to $FILES_DIR (e.g., filestosign/hello-world-app.exe) before running."
+            exit 1
+          fi
+          echo "✅ Found EXE(s):"
+          ls -ლა "$FILES_DIR"/*.exe 2>/dev/null || ls -la "$FILES_DIR"/*.exe
+
+      - name: Start Signum Agent container
+        shell: bash
+        env:
+          SIGNUM_HOSTNAME: ${{ secrets.SIGNUM_HOSTNAME }}
+          SIGNUM_CLIENTID: ${{ secrets.SIGNUM_CLIENTID }}
+          SIGNUM_USERNAME: ${{ secrets.SIGNUM_USERNAME }}
+          SIGNUM_PASSWORD: ${{ secrets.SIGNUM_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+          docker pull "$SIGNUM_AGENT_IMAGE"
+
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --privileged \
+            --user 0:0 \
+            -e SIGNUM_HOSTNAME \
+            -e SIGNUM_CLIENTID \
+            -e SIGNUM_USERNAME \
+            -e SIGNUM_PASSWORD \
+            -e SIGNUM_LOGLEVEL=HIGH \
+            -e SIGNUM_LOGTYPE=FILE \
+            -v "$PWD/$FILES_DIR:/mnt" \
+            "$SIGNUM_AGENT_IMAGE"
+
+          echo "⏳ Waiting for agent to start..."
+          for i in {1..60}; do
+            if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+              echo "❌ Container exited early. Logs:"
+              docker logs "$CONTAINER_NAME" | tail -n 400 || true
+              exit 1
+            fi
+
+            LOGS="$(docker logs "$CONTAINER_NAME" 2>&1 | tail -n 400 || true)"
+            if echo "$LOGS" | grep -q "Invalid value for loglevel parameter"; then
+              echo "❌ Agent rejected loglevel. Logs:"
+              echo "$LOGS"
+              exit 1
+            fi
+
+            # Generic "started" signal
+            if echo "$LOGS" | grep -q "Application started"; then
+              echo "✅ Agent started"
+              break
+            fi
+
+            sleep 2
+          done
+
+          echo "📋 Recent agent logs:"
+          docker logs "$CONTAINER_NAME" | tail -n 200 || true
+
+          echo "📋 Verify mount inside container:"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la /mnt && ls -la /mnt/*.exe"
+
+          echo "📋 Verify pkcs11 cfg exists:"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$PKCS11_CFG'"
+
+          echo "📋 Locate jsign jar (using configured path, then fallback search):"
+          docker exec "$CONTAINER_NAME" sh -lc "ls -la '$JSIGN_JAR' || (find / -maxdepth 4 -name 'jsign-*.jar' 2>/dev/null | head -n 20 || true)"
+
+      - name: Sign EXE(s) with JSign (PKCS11)
+        shell: bash
+        env:
+          # Put your real alias in a secret if you don't want it hardcoded.
+          JSIGN_ALIAS: ${{ secrets.JSIGN_ALIAS }}
+        run: |
+          set -euo pipefail
+
+          # If not provided as a secret, fall back to the example alias you gave.
+          if [ -z "${JSIGN_ALIAS:-}" ]; then
+            JSIGN_ALIAS='3AB5BFB91DFBB46CF765D5BEE51429618C4857DD - Certificate'
+          fi
+
+          echo "✅ Using alias: $JSIGN_ALIAS"
+          echo "📦 Files to sign:"
+          ls -la "$FILES_DIR"/*.exe
+
+          # Run jsign inside container over the mounted /mnt/*.exe
+          docker exec "$CONTAINER_NAME" sh -lc "
+            set -euo pipefail
+            JAVA_BIN=\$(command -v java)
+            echo \"java: \$JAVA_BIN\"
+            echo \"Signing: \$(ls -1 /mnt/*.exe)\"
+            JAR='$JSIGN_JAR'
+            if [ ! -f \"\$JAR\" ]; then
+              JAR=\$(find / -maxdepth 4 -name 'jsign-*.jar' 2>/dev/null | head -n 1 || true)
+            fi
+            if [ -z \"\$JAR\" ] || [ ! -f \"\$JAR\" ]; then
+              echo '❌ Could not find jsign jar in container.'
+              exit 1
+            fi
+            echo \"jsign jar: \$JAR\"
+            java -jar \"\$JAR\" \
+              --keystore '$PKCS11_CFG' \
+              --storetype PKCS11 \
+              --alias \"${JSIGN_ALIAS}\" \
+              /mnt/*.exe
+          "
+
+          echo "✅ Signed files (host view):"
+          ls -la "$FILES_DIR"/*.exe
+
+      - name: Upload signed EXE artifact(s)
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-exes
+          path: |
+            filestosign/*.exe
+
+      - name: Cleanup container
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker logs "$CONTAINER_NAME" | tail -n 400 || true
+          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
